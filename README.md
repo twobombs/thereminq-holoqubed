@@ -1,4 +1,4 @@
-# ThereminQ Holoqubed 🌌
+# ThereminQ HoloQubed 🌌
 
 **An experimental, quantum-inspired, sparse holographic AI inference engine.**
 
