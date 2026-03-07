@@ -117,7 +117,7 @@ def run_holoqubed_loom(context, queue):
     # Host Memory Setup (Simulating the 320GB RAM & 8GB HBM2)
     # Note: We use sizes divisible by 2 because the kernel casts them to half2
     # -------------------------------------------------------------------------
-    dict_elements = 2_000_000 
+    dict_elements = 16_777_216  # 1 << 24 (HILBERT_DIM) to prevent out-of-bounds access
     
     print(f"Allocating arrays in System RAM...")
     # System RAM Dictionary (Zero-Copy Target)
