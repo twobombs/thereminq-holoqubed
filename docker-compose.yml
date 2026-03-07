@@ -1,0 +1,43 @@
+# docker-compose.yml
+# ThereminQ HoloQubed Multi-GPU Docker Environment
+
+services:
+  holoqubed-engine:
+    build: .
+    image: twobombs/thereminq-holoqubed:latest
+    container_name: holoqubed-multi-gpu
+    
+    # -------------------------------------------------------------------------
+    # The Multi-GPU Passthrough
+    # AMD requires the kfd compute node AND each specific render die
+    # -------------------------------------------------------------------------
+    devices:
+      - "/dev/kfd:/dev/kfd"
+      - "/dev/dri/renderD128:/dev/dri/renderD128" # V340 Card 1 - Die A
+      - "/dev/dri/renderD129:/dev/dri/renderD129" # V340 Card 1 - Die B
+      - "/dev/dri/renderD130:/dev/dri/renderD130" # V340 Card 2 - Die A
+      - "/dev/dri/renderD131:/dev/dri/renderD131" # V340 Card 2 - Die B
+      - "/dev/dri/renderD132:/dev/dri/renderD132" # V340 Card 3 - Die A
+      - "/dev/dri/renderD133:/dev/dri/renderD133" # V340 Card 3 - Die B
+
+    # AMD OpenCL permissions
+    group_add:
+      - video
+      - render
+
+    # -------------------------------------------------------------------------
+    # IPC & Memory (CRITICAL for Zero-Copy / DMA)
+    # -------------------------------------------------------------------------
+    ipc: host
+    
+    # Expose both CPU node RAM banks to the container
+    cpuset: "0-96"        # Change this to match your total EPYC thread count
+    mem_limit: "320g"     # Safety cap for your system RAM
+
+    # Bind the current directory so you can edit Python scripts without rebuilding
+    volumes:
+      - .:/app
+
+    # Interactive terminal
+    stdin_open: true
+    tty: true
