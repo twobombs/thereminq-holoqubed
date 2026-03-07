@@ -90,8 +90,9 @@ def forge_holo_dictionary(gguf_path: str, output_holo_path: str, prune_threshold
     # 7. Export the .holo Dictionary
     print(f"\nForge Complete. Packing spatial database to {output_holo_path}...")
     
-    # We use np.savez_compressed to create a heavily optimized, memory-mappable dictionary
-    np.savez_compressed(output_holo_path, **holo_dictionary)
+    # We use np.savez to create a heavily optimized, memory-mappable dictionary.
+    # Note: Using savez_compressed would break mmap_mode='r' in the loader.
+    np.savez(output_holo_path, **holo_dictionary)
     
     total_sparsity = 100.0 * (1.0 - (total_surviving_params / total_original_params))
     print(f"Total Model Sparsity Achieved: {total_sparsity:.2f}%")

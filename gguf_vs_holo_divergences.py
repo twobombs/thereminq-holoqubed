@@ -6,7 +6,7 @@ to measure the mathematical divergence caused by the SiLU sparsity threshold.
 
 import numpy as np
 from llama_cpp import Llama
-from dictionary_loader import HoloQueryPlanner # Your CPU RAM Loader
+from holo_loader import HoloQueryPlanner # Your CPU RAM Loader
 import time
 
 def calculate_divergence(dense_logits: np.ndarray, sparse_coords: np.ndarray, sparse_logits: np.ndarray):
