@@ -9,6 +9,7 @@ import os
 import time
 import numpy as np
 import pyopencl as cl
+from typing import Tuple
 
 # =============================================================================
 # 1. HILBERT CURVE ENCODING (Spatial Coordinate Generation)
@@ -31,7 +32,7 @@ def encode_boundary_index(row_data: np.ndarray) -> int:
 # =============================================================================
 # 2. OPENCL RUSTICL INITIALIZATION
 # =============================================================================
-def initialize_opencl():
+def initialize_opencl() -> Tuple[cl.Context, cl.CommandQueue]:
     print("--- Holoqubed OpenCL Initialization ---")
     
     # Validate ROCm override for Vega 10
@@ -66,7 +67,7 @@ def initialize_opencl():
 # =============================================================================
 # 3. THE HOLOQUBED KERNEL & EXECUTION LOOM
 # =============================================================================
-def run_holoqubed_loom(context, queue):
+def run_holoqubed_loom(context: cl.Context, queue: cl.CommandQueue) -> None:
     # -------------------------------------------------------------------------
     # The OpenCL C Kernel (Rapid Packed Math + Sparse Inner Join)
     # -------------------------------------------------------------------------
