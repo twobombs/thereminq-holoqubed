@@ -1,0 +1,15 @@
+name: Local Config
+version: 1.0.0
+schema: v1
+models:
+  - name: Local Qwen
+    provider: openai
+    model: Qwen3.5-35B-A3B-Q4_K_S.gguf
+    apiBase: http://localhost:8033/v1
+    apiKey: sk-no-key-required
+    roles:
+      - chat
+      - edit
+      - apply
+      - autocomplete
+      - embed
