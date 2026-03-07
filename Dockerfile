@@ -18,9 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-pyopencl \
-    python3-numpy \
     && rm -rf /var/lib/apt/lists/*
-
+# Python dependancies that need upgrades
+RUN pip install --break-system-packages gguf numpy
 # ------------------------------------------------------------------------
 # OpenCL Driver Configuration (Mesa Rusticl)
 # ------------------------------------------------------------------------
