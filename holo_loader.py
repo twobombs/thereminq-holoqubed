@@ -168,7 +168,7 @@ def simulate_inference_step(
 if __name__ == "__main__":
     import os
     
-    # Note: To run this test, you must have first generated a .holo file using gguf_to_holo.py
+    # Note: To run this test, you must have first generated a .holo file using gguf2holo.py
     test_holo_file = "models/llama-3-8b.holo"
     
     if os.path.exists(test_holo_file):

@@ -8,8 +8,9 @@ import numpy as np
 from llama_cpp import Llama
 from holo_loader import HoloQueryPlanner # Your CPU RAM Loader
 import time
+from typing import Tuple
 
-def calculate_divergence(dense_logits: np.ndarray, sparse_coords: np.ndarray, sparse_logits: np.ndarray):
+def calculate_divergence(dense_logits: np.ndarray, sparse_coords: np.ndarray, sparse_logits: np.ndarray) -> Tuple[bool, float, int, int]:
     """
     Measures how much the sparse Holographic output deviates from the dense GGUF output.
     """
@@ -34,7 +35,7 @@ def calculate_divergence(dense_logits: np.ndarray, sparse_coords: np.ndarray, sp
         
     return top_1_match, mse, dense_top_1, sparse_top_1
 
-def run_verification_suite(gguf_path: str, holo_path: str, test_prompt: str):
+def run_verification_suite(gguf_path: str, holo_path: str, test_prompt: str) -> None:
     print(f"--- Holoqubed Verification Suite ---")
     print(f"Reference: {gguf_path}")
     print(f"Target: {holo_path}")
@@ -80,7 +81,7 @@ def run_verification_suite(gguf_path: str, holo_path: str, test_prompt: str):
     
     # Query the final layer (lm_head)
     # Assuming 'output.weight' or similar is your final layer name in the dictionary
-    layer_name = [l for l in planner.layers if "output" in l.lower() or "lm_head" in l.lower()][0]
+    layer_name = next((l for l in planner.layers if "output" in l.lower() or "lm_head" in l.lower()), None)
     matched_coords, matched_weights = planner.query_active_pathways(layer_name, mock_active_coords)
     
     sparse_time = (time.time() - start_sparse) * 1000

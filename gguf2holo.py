@@ -64,6 +64,9 @@ def forge_holo_dictionary(
         reader = gguf.GGUFReader(gguf_path)
     except Exception as e:
         raise RuntimeError(f"Failed to parse GGUF file: {e}")
+
+    if not any(len(tensor.data.shape) >= 2 for tensor in reader.tensors):
+        raise ValueError("No 2D dense matrices found in GGUF file.")
     
     holo_dictionary = {}
     total_original_params = 0

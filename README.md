@@ -33,7 +33,7 @@ Memory-maps (`mmap`) the massive `.holo` dictionary to disk, allowing the system
 ### 3. The Multi-GPU Loom (`holoqubed_prototype.py`)
 The PyOpenCL execution engine. It automatically detects all available Vega 10 dies, establishes a unified Zero-Copy memory bridge, and uses a **Scatter-Gather** pattern to distribute spatial lookups across the hardware. It executes a custom Rapid Packed Math (`half2`) kernel for hardware-accelerated SiLU activation and Top-K filtering.
 
-### 4. The Accuracy Harness (`gguf_vs_holo_divergence.py`)
+### 4. The Accuracy Harness (`gguf_vs_holo_divergences.py`)
 
 Runs a dense `llama.cpp` reference model side-by-side with the sparse `.holo` engine to measure mathematical divergence. This is used to tune the sparsity threshold during the offline forge to ensure the engine retains maximum intelligence while dropping dead weight.
 
