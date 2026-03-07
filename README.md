@@ -39,3 +39,7 @@ You can build the Docker container locally using the provided `Dockerfile`. This
 
 ```bash
 docker build -t holoqubed:latest .
+
+
+## ToDo:
+- GGUF/d34 Ingress/conversion to sparse HoloQubed format
