@@ -42,4 +42,4 @@ docker build -t holoqubed:latest .
 ```
 
 ## ToDo:
-- GGUF/d34 Ingress/conversion to sparse HoloQubed format
+- GGUF/d34 Ingress/conversion and execution in sparse HoloQubed format
