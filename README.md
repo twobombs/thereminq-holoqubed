@@ -8,7 +8,7 @@ Currently in the prototyping phase, the engine is being modeled in Python (`PyOp
 
 ---
 
-## 🧠 Core Architecture
+## Core Architecture
 
 Traditional Large Language Models (LLMs) push massive weight matrices across the PCIe bus for every single token. Holoqubed bypasses this by translating neural pathways into physical memory space:
 
