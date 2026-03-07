@@ -10,7 +10,7 @@ Currently in the prototyping phase, the engine is built in Python (`PyOpenCL` + 
 
 ## Core Architecture
 
-Traditional Large Language Models (LLMs) push massive weight matrices across the PCIe bus for every single token. Holoqubed bypasses this by translating neural pathways into physical memory space:
+Traditional Large Language Models (LLMs) push massive weight matrices across the PCIe bus for every single token. HoloQubed bypasses this by translating neural pathways into physical memory space:
 
 * **The Holographic Dictionary:** Stored in massive system RAM (e.g., 320GB). It maps token pathways as spatial coordinates rather than dense weights.
 * **Hilbert Curve Encoding:** Converts floating-point activation thresholds into 1D spatial coordinates using bitwise XOR interleaving.
@@ -19,7 +19,7 @@ Traditional Large Language Models (LLMs) push massive weight matrices across the
 
 ---
 
-## 🛠️ The Holoqubed Toolchain
+## 🛠️ The HoloQubed Toolchain
 
 The repository contains a complete pipeline to convert, load, execute, and verify holographic models.
 
@@ -52,7 +52,7 @@ This engine is being co-designed alongside a specific enterprise hardware topolo
 
 ## 🐳 Software Stack: Containerized Rusticl
 
-Holoqubed does not use AMD's proprietary drivers. Instead, it runs inside a lightweight **Ubuntu 26.04 Docker container** leveraging **Mesa's Rusticl**, a modern, Rust-based OpenCL 3.0 implementation that fully supports `radeonsi` and Rapid Packed Math.
+HoloQubed does not use AMD's proprietary drivers. Instead, it runs inside a lightweight **Ubuntu 26.04 Docker container** leveraging **Mesa's Rusticl**, a modern, Rust-based OpenCL 3.0 implementation that fully supports `radeonsi` and Rapid Packed Math.
 
 ### Building the Environment
 You can build the Docker container locally using the provided `Dockerfile`.
