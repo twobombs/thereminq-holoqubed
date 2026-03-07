@@ -94,3 +94,4 @@ docker run -it --rm \
   -v $(pwd):/app \
   twobombs/thereminq-holoqubed /bin/bash
 ```
+For MultiGPU leverage `docker-compose.yml`
