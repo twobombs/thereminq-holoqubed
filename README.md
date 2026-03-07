@@ -58,7 +58,7 @@ HoloQubed does not use AMD's proprietary drivers. Instead, it runs inside a ligh
 You can build the Docker container locally using the provided `Dockerfile`.
 
 ```bash
-docker build -t holoqubed:latest .
+docker build -t twobombs/thereminq-holoqubed:latest .
 ```
 
 ## A note on NUMA nodes
