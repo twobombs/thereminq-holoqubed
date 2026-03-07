@@ -13,7 +13,7 @@ def encode_hilbert_vectorized(dense_indices: np.ndarray) -> np.ndarray:
     """
     A vectorized version of your Hilbert bit-interleaving function.
     Takes an N-dimensional array of dense matrix indices and encodes 
-    them into a 1D spatial coordinate array for O(1) lookup.
+    them into a 1D spatial coordinate array for O(1) / O(log N) lookup.
     """
     # For a 2D weight matrix, dense_indices has shape (N, 2)
     # We apply the bitwise XOR logic across the columns
@@ -21,8 +21,6 @@ def encode_hilbert_vectorized(dense_indices: np.ndarray) -> np.ndarray:
     
     for dim in range(dense_indices.shape[1]):
         # Shift and XOR based on your Holoqubed research logic
-        # (Adapted for integer indices rather than float thresholds here, 
-        # as we are encoding the physical pathway's location)
         val = dense_indices[:, dim] % 255
         spatial_coords ^= (val << (dim * 2))
         
@@ -30,6 +28,9 @@ def encode_hilbert_vectorized(dense_indices: np.ndarray) -> np.ndarray:
 
 def forge_holo_dictionary(gguf_path: str, output_holo_path: str, prune_threshold: float = 0.05):
     print(f"Igniting the Forge: Loading {gguf_path}...")
+    
+    if not os.path.exists(gguf_path):
+        raise FileNotFoundError(f"Could not find GGUF file at {gguf_path}")
     
     # 1. Parse the Dense GGUF Model
     reader = gguf.GGUFReader(gguf_path)
@@ -45,7 +46,8 @@ def forge_holo_dictionary(gguf_path: str, output_holo_path: str, prune_threshold
         name = tensor.name
         data = tensor.data # This loads the dense NumPy array
         
-        # Skip 1D tensors (like layer norms or biases) or handle them separately
+        # Skip 1D tensors (like layer norms or biases) or handle them separately.
+        # These are crucial for mathematical stability and are small enough to stay dense.
         if len(data.shape) < 2:
             holo_dictionary[name] = data.astype(np.float16)
             continue
@@ -72,14 +74,20 @@ def forge_holo_dictionary(gguf_path: str, output_holo_path: str, prune_threshold
         # Translate those 2D coordinates into your 1D Hilbert spatial signatures
         spatial_coords = encode_hilbert_vectorized(dense_indices)
         
-        # 5. Pack into CSR-style arrays
+        # 5. SORTING FOR O(log N) QUERY PLANNER (CRITICAL STEP)
+        # We must sort the coordinates so np.searchsorted can instantly find them during inference
+        sort_order = np.argsort(spatial_coords)
+        spatial_coords = spatial_coords[sort_order]
+        surviving_weights = surviving_weights[sort_order]
+        
+        # 6. Pack into CSR-style arrays
         holo_dictionary[f"{name}.coords"] = spatial_coords
         holo_dictionary[f"{name}.weights"] = surviving_weights
         
         sparsity = 100.0 * (1.0 - (surviving_count / original_count))
-        print(f"  [FORGED] {name} | Sparsity: {sparsity:.2f}% | Survivors: {surviving_count}")
+        print(f"  [FORGED] {name} | Sparsity: {sparsity:.2f}% | Survivors: {surviving_count:,}")
 
-    # 6. Export the .holo Dictionary
+    # 7. Export the .holo Dictionary
     print(f"\nForge Complete. Packing spatial database to {output_holo_path}...")
     
     # We use np.savez_compressed to create a heavily optimized, memory-mappable dictionary
@@ -90,6 +98,10 @@ def forge_holo_dictionary(gguf_path: str, output_holo_path: str, prune_threshold
     print(f"Original Params: {total_original_params:,} -> Holographic Pathways: {total_surviving_params:,}")
 
 if __name__ == "__main__":
-    # Example usage:
-    # forge_holo_dictionary("models/llama-3-8b.gguf", "models/llama-3-8b.holo", prune_threshold=0.08)
+    # Example usage (uncomment and modify to run your own conversions):
+    # input_model = "models/Meta-Llama-3-8B.gguf"
+    # output_holo = "models/Meta-Llama-3-8B.holo"
+    # threshold = 0.08
+    # 
+    # forge_holo_dictionary(input_model, output_holo, prune_threshold=threshold)
     pass
