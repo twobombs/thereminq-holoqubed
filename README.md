@@ -43,10 +43,10 @@ Runs a dense `llama.cpp` reference model side-by-side with the sparse `.holo` en
 
 This engine is being co-designed alongside a specific enterprise hardware topology optimized for memory bandwidth and Rapid Packed Math (FP16):
 
-* **Motherboard:** Supermicro Dual-EPYC (e.g., H11DSi)
-* **System RAM:** 320GB+ (acting as the Holographic Dictionary pool)
-* **GPUs:** 3x AMD Radeon Pro V340 (6x Vega 10 / `gfx900` dies) + NVidia/Intel OpenCL support
-* **Connection:** PCIe 3.0 x4 via shielded risers.
+* **Motherboard:** Supermicro Dual-EPYC (e.g., H11DSi) for a memory dense motherboard solution
+* **System RAM:** 320GB+ (acting as the Holographic Dictionary pool) GGUF filesize x10 in RAM 
+* **GPUs:** 3x AMD Radeon Pro V340 (6x Vega 10 / `gfx900` dies) with additional NVidia/Intel OpenCL support
+* **Interconnect:** PCIe 3.0 x4 via shielded risers
 
 ---
 
@@ -59,3 +59,38 @@ You can build the Docker container locally using the provided `Dockerfile`.
 
 ```bash
 docker build -t holoqubed:latest .
+```
+
+## A note on NUMA nodes
+
+If/as you are running HoloQubed on a dual-socket system (like AMD EPYC), you are dealing with Non-Uniform Memory Access (NUMA).
+
+Because HoloQubed streams Zero-Copy coordinates directly from System RAM to the GPU via Direct Memory Access (DMA), crossing the Infinity Fabric between CPU nodes will cripple performance. Furthermore, dynamic OS-level memory balancing will cause PCIe bus timeouts.
+
+How to run HoloQubed safely:
+
+1. Disable OS Automatic Balancing:
+You must turn off the host OS's dynamic NUMA balancer before running the container.
+
+```bash
+echo 0 | sudo tee /proc/sys/kernel/numa_balancing
+sudo systemctl stop numad
+```
+
+2. Launch with Docker NUMA Pinning (--cpuset):
+Use Docker's native cgroup controls to lock the container's memory pool and CPU threads strictly to the physical socket that controls your target GPU.
+
+```bash
+# Example: Running on GPU 0 (renderD128) bound strictly to CPU Node 0.
+# The --ipc=host flag is critical for mapping large Zero-Copy buffers.
+docker run -it --rm \
+  --device=/dev/kfd \
+  --device=/dev/dri/renderD128 \
+  --group-add render \
+  --group-add video \
+  --cpuset-cpus="0-31" \
+  --cpuset-mems="0" \
+  --ipc=host \
+  -v $(pwd):/app \
+  twobombs/thereminq-holoqubed /bin/bash
+```
