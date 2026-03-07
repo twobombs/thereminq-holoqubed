@@ -1,6 +1,6 @@
 """
 ThereminQ Holoqubed - PyOpenCL Prototype
-Target: AMD Radeon Pro V340 (Vega 10 / gfx900) via Mesa Rusticl
+Target: AMD Radeon Pro V340 (Vega 10 / gfx900) or better via Mesa Rusticl
 Description: A sparse, holographic AI inference engine bypassing dense matrix math 
              via O(1) spatial queries and FP16 Rapid Packed Math.
 """
