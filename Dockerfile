@@ -47,7 +47,7 @@ WORKDIR /app
 
 # Copy your prototype Python engine into the container
 # Ensure 'holoqubed_prototype.py' is in the same folder as this Dockerfile
-COPY holoqubed_prototype.py /app/
+COPY /engine/*.py /app/
 
 # Set the default command to execute the Holoqubed prototype
-CMD ["python3", "holoqubed_prototype.py"]
+# CMD ["python3", "holoqubed_prototype.py"]
