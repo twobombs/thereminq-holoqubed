@@ -15,7 +15,7 @@ Currently in the prototyping phase, the engine is built in Python (`PyOpenCL` + 
 Traditional Large Language Models (LLMs) push massive weight matrices across the PCIe bus for every single token. HoloQubed bypasses this by translating neural pathways into physical memory space:
 
 * **The Holographic Dictionary:** Stored in massive system RAM (e.g., 320GB). It maps token pathways as spatial coordinates rather than dense weights.
-* **Hilbert Curve Encoding:** Converts floating-point activation thresholds into 1D spatial coordinates using bitwise XOR interleaving.
+* **Spatial Encoding (Holoqubed Research Logic):** Converts floating-point activation thresholds into 1D spatial coordinates using a custom bit-interleaving scheme (bitwise XOR and shifts), producing a Z-order (Morton) curve.
 * **Tesseract KV Cache:** Represents a 4D coordinate space mapping the active sequence generation.
 * **Sparse Execution:** Resolves $O(\log N)$ or $O(1)$ lookups on the CPU and only pushes active coordinate pathways across the PCIe bus to the GPU. This effectively neutralizes traditional PCIe bottlenecks, allowing the engine to run over x4 connections.
 
@@ -25,17 +25,17 @@ Traditional Large Language Models (LLMs) push massive weight matrices across the
 
 The repository contains a complete pipeline to convert, load, execute, and verify holographic models.
 
-### 1. The Offline Forge (`gguf2holo.py`)
+### 1. The Offline Forge (`engine/gguf2holo.py`)
 
-Converts standard dense `.gguf` models into the highly optimized, memory-mappable `.holo` format. It applies the "Holoqubed Collapse" (threshold pruning) to eliminate mathematically insignificant weights and encodes the surviving pathways into 1D spatial coordinates.
+Converts standard dense `.gguf` models into the highly optimized, memory-mappable `.holo` format. It uses `np.savez` (uncompressed) instead of compressed formats to enable true zero-copy memory mapping (`mmap_mode='r'`). It applies the "Holoqubed Collapse" (threshold pruning) to eliminate mathematically insignificant weights and encodes the surviving pathways into 1D spatial coordinates.
 
-### 2. The CPU Query Planner (`holo-loader.py`)
+### 2. The CPU Query Planner (`engine/holo_loader.py`)
 Memory-maps (`mmap`) the massive `.holo` dictionary to disk, allowing the system RAM to act as a zero-latency cache. When the engine generates spatial coordinates, the Query Planner performs sub-millisecond $O(\log N)$ binary searches to extract only the necessary FP16 pathways to send to the GPUs.
 
-### 3. The Multi-GPU Loom (`holoqubed_prototype.py`)
+### 3. The Multi-GPU Loom (`engine/holoqubed_prototype.py`)
 The PyOpenCL execution engine. It automatically detects all available Vega 10 dies, establishes a unified Zero-Copy memory bridge, and uses a **Scatter-Gather** pattern to distribute spatial lookups across the hardware. It executes a custom Rapid Packed Math (`half2`) kernel for hardware-accelerated SiLU activation and Top-K filtering.
 
-### 4. The Accuracy Harness (`gguf_vs_holo_divergences.py`)
+### 4. The Accuracy Harness (`engine/gguf_vs_holo_divergences.py`)
 
 Runs a dense `llama.cpp` reference model side-by-side with the sparse `.holo` engine to measure mathematical divergence. This is used to tune the sparsity threshold during the offline forge to ensure the engine retains maximum intelligence while dropping dead weight.
 
