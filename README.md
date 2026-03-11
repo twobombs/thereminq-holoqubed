@@ -41,6 +41,16 @@ Runs a dense `llama.cpp` reference model side-by-side with the sparse `.holo` en
 
 ---
 
+## 🧰 Tool Cupboard (`tc/`)
+
+A collection of auxiliary utilities and autonomous workflows.
+
+### Deep Local Research (`tc/deep-local-research.py`)
+
+An autonomous research script powered by local LLMs (orchestrator and reasoning models). It performs deep web scraping via DuckDuckGo (filtering out video/image sites), executes a multi-step analysis (Tool Planning, Reasoning, Verification), and outputs a formatted PDF report.
+
+---
+
 ## 💻 Hardware Target
 
 This engine is being co-designed alongside a specific enterprise hardware topology optimized for memory bandwidth and Rapid Packed Math (FP16):
