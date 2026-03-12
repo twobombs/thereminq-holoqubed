@@ -244,3 +244,4 @@ if __name__ == "__main__":
         print(f"✅ [Success] Report generated: {os.path.abspath(saved_file)}")
     except Exception as e:
         print(f"\n❌ [Error] The workflow failed: {str(e)}")
+        
