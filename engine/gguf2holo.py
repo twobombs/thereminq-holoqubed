@@ -2,7 +2,7 @@
 ThereminQ Holoqubed - Offline GGUF Ingress & Conversion Pipeline
 Converts standard dense .gguf models (FP32/FP16/BF16) into the sparse, 
 spatially encoded .holo dictionary. 
-*PARALLEL STREAMING VERSION WITH BF16 BIT-SHIFTING AND OOM PROTECTION*
+*PARALLEL STREAMING VERSION WITH BF16 BIT-SHIFTING, OOM PROTECTION, & ZSTD COMPRESSION*
 """
 
 import numpy as np
@@ -13,9 +13,10 @@ import zipfile
 import io
 import gc
 import concurrent.futures
+import zstandard
 
 
-HILBERT_DIM = 24
+MORTON_DIM = 24
 
 
 def decode_bf16_to_fp32(tensor_data: np.ndarray) -> np.ndarray:
@@ -34,9 +35,9 @@ def decode_bf16_to_fp32(tensor_data: np.ndarray) -> np.ndarray:
     return tensor_data.astype(np.float32)
 
 
-def encode_hilbert_vectorized(dense_indices: np.ndarray, chunk_size: int = 5_000_000) -> np.ndarray:
+def encode_morton_vectorized(dense_indices: np.ndarray, chunk_size: int = 5_000_000) -> np.ndarray:
     """
-    Batched Morton bit-interleaving. Processes coordinates in chunks 
+    Batched Morton (Z-order) bit-interleaving. Processes coordinates in chunks 
     to prevent catastrophic RAM explosions on massive layers.
     """
     num_dims = dense_indices.shape[1]
@@ -59,23 +60,25 @@ def encode_hilbert_vectorized(dense_indices: np.ndarray, chunk_size: int = 5_000
                 
             chunk_coords |= (spread_val << dim)
             
-        spatial_coords[start:end] = chunk_coords % (1 << HILBERT_DIM)
+        spatial_coords[start:end] = chunk_coords % (1 << MORTON_DIM)
         
     return spatial_coords
 
 
-def forge_layer_worker(name: str, data: np.ndarray, is_bypassed: bool, std_factor: float) -> dict:
+def forge_layer_worker(name: str, data: np.ndarray, is_bypassed: bool, std_factor: float, zstd_level: int) -> dict:
     """
-    Isolated background process. Does the heavy math, packs results into raw bytes, 
-    and returns them to the main thread for writing to the Zip file.
+    Isolated background process. Does the heavy math, compresses the raw bytes 
+    using Zstandard, and returns them for O(1) random-access ZIP storage.
     """
     result = {
         "name": name,
-        "files": {}, # Dictionary of {filename: raw_bytes}
+        "files": {}, # Dictionary of {filename: compressed_bytes}
         "orig_params": data.size,
         "surv_params": 0,
         "log": ""
     }
+    
+    compressor = zstandard.ZstdCompressor(level=zstd_level)
     
     if is_bypassed:
         dense_data = data.astype(np.float16)
@@ -83,8 +86,8 @@ def forge_layer_worker(name: str, data: np.ndarray, is_bypassed: bool, std_facto
         
         buf = io.BytesIO()
         np.save(buf, dense_data, allow_pickle=False)
-        result["files"][f"{name}.npy"] = buf.getvalue()
-        result["log"] = f"  [BYPASSED] {name} | Saved as Dense (Sparsity: 0.00%)"
+        result["files"][f"{name}.npy.zst"] = compressor.compress(buf.getvalue())
+        result["log"] = f"  [BYPASSED] {name} | Saved as Zstd Dense (Sparsity: 0.00%)"
         
         del dense_data, buf
         return result
@@ -105,22 +108,22 @@ def forge_layer_worker(name: str, data: np.ndarray, is_bypassed: bool, std_facto
 
     # Extract indices and encode
     dense_indices = np.argwhere(mask)
-    spatial_coords = encode_hilbert_vectorized(dense_indices)
+    spatial_coords = encode_morton_vectorized(dense_indices)
     
     # Sort for O(log N) Query Planner
     sort_order = np.argsort(spatial_coords)
     spatial_coords = spatial_coords[sort_order]
     surviving_weights = surviving_weights[sort_order]
     
-    # Pack Coords into memory buffer
+    # Pack Coords into memory buffer & Compress
     coord_buf = io.BytesIO()
     np.save(coord_buf, spatial_coords, allow_pickle=False)
-    result["files"][f"{name}.coords.npy"] = coord_buf.getvalue()
+    result["files"][f"{name}.coords.npy.zst"] = compressor.compress(coord_buf.getvalue())
     
-    # Pack Weights into memory buffer
+    # Pack Weights into memory buffer & Compress
     weight_buf = io.BytesIO()
     np.save(weight_buf, surviving_weights, allow_pickle=False)
-    result["files"][f"{name}.weights.npy"] = weight_buf.getvalue()
+    result["files"][f"{name}.weights.npy.zst"] = compressor.compress(weight_buf.getvalue())
     
     sparsity = 100.0 * (1.0 - (surviving_count / result["orig_params"]))
     result["log"] = f"  [FORGED] {name} | Cutoff: {dynamic_threshold:.4f} | Sparsity: {sparsity:.2f}% | Survivors: {surviving_count:,}"
@@ -133,7 +136,7 @@ def forge_layer_worker(name: str, data: np.ndarray, is_bypassed: bool, std_facto
     return result
 
 
-def forge_holo_dictionary(gguf_path: str, output_holo_path: str, std_factor: float = 0.5, max_workers: int = 4) -> dict:
+def forge_holo_dictionary(gguf_path: str, output_holo_path: str, std_factor: float = 0.5, max_workers: int = 4, zstd_level: int = 3) -> dict:
     print(f"Igniting the Forge: Loading {gguf_path}...")
     
     if not os.path.exists(gguf_path):
@@ -147,10 +150,10 @@ def forge_holo_dictionary(gguf_path: str, output_holo_path: str, std_factor: flo
     total_original_params = 0
     total_surviving_params = 0
 
-    print(f"Applying Dynamic Holoqubed Collapse (StdDev: {std_factor} | Workers: {max_workers})...")
+    print(f"Applying Dynamic Holoqubed Collapse (StdDev: {std_factor} | Workers: {max_workers} | Zstd Level: {zstd_level})...")
     print(f"Streaming directly to disk: {output_holo_path}")
     
-    # Open the file as an uncompressed ZIP stream
+    # Open the file as an uncompressed ZIP stream (Compression is handled by workers)
     with zipfile.ZipFile(output_holo_path, 'w', compression=zipfile.ZIP_STORED) as holo_zip:
         
         # Fire up the parallel worker pool
@@ -167,11 +170,10 @@ def forge_holo_dictionary(gguf_path: str, output_holo_path: str, std_factor: flo
                 data = decode_bf16_to_fp32(tensor.data)
                 
                 # Toss the decoded tensor to a background worker
-                future = executor.submit(forge_layer_worker, name, data, is_bypassed, std_factor)
+                future = executor.submit(forge_layer_worker, name, data, is_bypassed, std_factor, zstd_level)
                 active_futures.add(future)
                 
-                # ROLLING WINDOW: If queue is full, wait for a worker to finish
-                # This explicitly protects RAM from overflowing with queued tensors
+                # ROLLING WINDOW: explicitly protects RAM from overflowing with queued tensors
                 while len(active_futures) >= max_workers:
                     done, _ = concurrent.futures.wait(active_futures, return_when=concurrent.futures.FIRST_COMPLETED)
                     
@@ -213,9 +215,17 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, default=None, help="Optional output path for .holo file")
     parser.add_argument("--std_factor", type=float, default=0.5, help="Standard Deviation multiplier for pruning (default: 0.5)")
     parser.add_argument("--workers", type=int, default=4, help="Number of CPU cores to use (Warning: Higher = More RAM used!)")
+    parser.add_argument("--zstd_level", type=int, default=3, help="Zstandard compression level (1-22). Default: 3")
     
     args = parser.parse_args()
     
     out_path = args.output if args.output else args.gguf_path.rsplit('.', 1)[0] + '.holo'
     
-    forge_holo_dictionary(args.gguf_path, out_path, std_factor=args.std_factor, max_workers=args.workers)
+    forge_holo_dictionary(
+        args.gguf_path, 
+        out_path, 
+        std_factor=args.std_factor, 
+        max_workers=args.workers,
+        zstd_level=args.zstd_level
+    )
+
