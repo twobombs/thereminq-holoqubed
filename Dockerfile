@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pyopencl \
     && apt clean all && rm -rf /var/lib/apt/lists/*
 # Python dependancies that need upgrades
-RUN pip install --break-system-packages gguf numpy llama-cpp-python pyopencl
+RUN pip install --break-system-packages gguf numpy llama-cpp-python pyopencl transformers
 # ------------------------------------------------------------------------
 # OpenCL Driver Configuration (Mesa Rusticl)
 # ------------------------------------------------------------------------
