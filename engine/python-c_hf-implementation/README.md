@@ -11,3 +11,5 @@ holo loader module
 holo generate ext 
 
 <img width="694" height="383" alt="Screenshot from 2026-03-16 18-24-11" src="https://github.com/user-attachments/assets/003d67bf-9394-4396-b844-4a2c59fcac0e" />
+
+python overhead visible in benchmark results 
