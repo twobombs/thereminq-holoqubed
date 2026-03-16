@@ -25,17 +25,17 @@ Traditional Large Language Models (LLMs) push massive weight matrices across the
 
 The repository contains a complete pipeline to convert, load, execute, and verify holographic models.
 
-### 1. The Offline Forge (`engine/gguf2holo.py`)
+### 1. The Offline Forge (`engine/python-c_hf-implementation/gguf2holo.py`)
 
-Converts standard dense `.gguf` models into the highly optimized, memory-mappable `.holo` format. It uses `np.savez` (uncompressed) instead of compressed formats to enable true zero-copy memory mapping (`mmap_mode='r'`). It applies the "Holoqubed Collapse" (threshold pruning) to eliminate mathematically insignificant weights and encodes the surviving pathways into 1D spatial coordinates.
+Converts standard dense `.gguf` and `.pt` models into the highly optimized, memory-mappable `.holo` format using Zstd compression. It applies the "Holoqubed Collapse" (threshold pruning) to eliminate mathematically insignificant weights and encodes the surviving pathways into 1D spatial coordinates.
 
-### 2. The CPU Query Planner (`engine/holo_loader.py`)
+### 2. The CPU Query Planner (`engine/python-c_hf-implementation/holo_loader.py`)
 Memory-maps (`mmap`) the massive `.holo` dictionary to disk, allowing the system RAM to act as a zero-latency cache. When the engine generates spatial coordinates, the Query Planner performs sub-millisecond $O(\log N)$ binary searches to extract only the necessary FP16 pathways to send to the GPUs.
 
-### 3. The Multi-GPU Loom (`engine/holoqubed_prototype.py`)
+### 3. The Multi-GPU Loom (`engine/concept/holoqubed_prototype.py`)
 The PyOpenCL execution engine. It automatically detects all available Vega 10 dies, establishes a unified Zero-Copy memory bridge, and uses a **Scatter-Gather** pattern to distribute spatial lookups across the hardware. It executes a custom Rapid Packed Math (`half2`) kernel for hardware-accelerated SiLU activation and Top-K filtering.
 
-### 4. The Accuracy Harness (`engine/gguf_vs_holo_divergences.py`)
+### 4. The Accuracy Harness (`engine/concept/gguf_vs_holo_divergences.py`)
 
 Runs a dense `llama.cpp` reference model side-by-side with the sparse `.holo` engine to measure mathematical divergence. This is used to tune the sparsity threshold during the offline forge to ensure the engine retains maximum intelligence while dropping dead weight.
 
@@ -48,6 +48,15 @@ A collection of auxiliary utilities and autonomous workflows.
 ### Deep Local Research (`tc/deep-local-research.py`)
 
 An autonomous research script powered by local LLMs (orchestrator and reasoning models). It performs deep web scraping via DuckDuckGo (filtering out video/image sites), executes a multi-step analysis (Tool Planning, Reasoning, Verification), and outputs a formatted PDF report.
+
+---
+
+## 📂 Repository Structure
+
+*   **`engine/`**: Core execution scripts and utilities. See `engine/README.md`.
+    *   **`engine/concept/`**: Conceptual prototypes and verification harnesses. See `engine/concept/README.md`.
+    *   **`engine/python-c_hf-implementation/`**: Python/C++ integration with Hugging Face models. See `engine/python-c_hf-implementation/README.md`.
+*   **`tc/`**: Tool Cupboard containing autonomous workflows. See `tc/README.md`.
 
 ---
 
