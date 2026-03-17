@@ -15,7 +15,7 @@ import gc
 import concurrent.futures
 import zstandard
 
-MORTON_DIM = 24
+MORTON_DIM = 32
 
 def decode_bf16_to_fp32(tensor_data: np.ndarray) -> np.ndarray:
     """
