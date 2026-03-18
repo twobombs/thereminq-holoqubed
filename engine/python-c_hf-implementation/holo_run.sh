@@ -1,0 +1,1 @@
+python3 holo_generate_ext.py --model_id twobombs/nanochat-d34-sft-hf --holo_file model_169150.holo --prompt "there is no spoon"

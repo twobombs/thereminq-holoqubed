@@ -8,9 +8,21 @@ cl_program program;
 cl_kernel spmv_kernel;
 bool is_initialized = false;
 
-// The True End-to-End Sparse SpMV Kernel
+// The Grid-Stride Local Reduction SpMV Kernel
 const char* SPMV_KERNEL_CODE = R"(
-inline void atomic_add_float(volatile __global float *source, const float operand) {
+#pragma OPENCL EXTENSION cl_khr_local_int32_base_atomics : enable
+#pragma OPENCL EXTENSION cl_khr_global_int32_base_atomics : enable
+
+inline void atomic_add_local_float(volatile __local float *source, const float operand) {
+    union { unsigned int int_val; float float_val; } newVal;
+    union { unsigned int int_val; float float_val; } prevVal;
+    do {
+        prevVal.float_val = *source;
+        newVal.float_val = prevVal.float_val + operand;
+    } while (atomic_cmpxchg((volatile __local unsigned int *)source, prevVal.int_val, newVal.int_val) != prevVal.int_val);
+}
+
+inline void atomic_add_global_float(volatile __global float *source, const float operand) {
     union { unsigned int int_val; float float_val; } newVal;
     union { unsigned int int_val; float float_val; } prevVal;
     do {
@@ -19,25 +31,51 @@ inline void atomic_add_float(volatile __global float *source, const float operan
     } while (atomic_cmpxchg((volatile __global unsigned int *)source, prevVal.int_val, newVal.int_val) != prevVal.int_val);
 }
 
-__kernel void spmv_holo_weights(__global const ulong* morton_coords, __global const ushort* sparse_weights, __global const float* input_vector, __global float* output_vector, const int num_elements) {
+__kernel void spmv_holo_weights_fast(
+    __global const ulong* morton_coords,   
+    __global const ushort* sparse_weights_fp16, 
+    __global const float* input_vector,
+    __global float* output_vector,
+    const int num_elements,
+    const int out_features,
+    __local float* local_out
+) {
+    int lid = get_local_id(0);
+    int local_size = get_local_size(0);
     int gid = get_global_id(0);
-    if (gid >= num_elements) return;
+    int global_size = get_global_size(0);
 
-    ulong m_coord = morton_coords[gid];
-    float weight = vload_half(gid, sparse_weights); 
-
-    uint row = 0; uint col = 0;
-    for (int bit = 0; bit < 16; bit++) {
-        ulong shift = bit * 2; 
-        row |= (uint)(((m_coord >> (0 + shift)) & 1) << bit);
-        col |= (uint)(((m_coord >> (1 + shift)) & 1) << bit);
+    // 1. Collaborative Zeroing of the Workgroup's L1 Output Cache
+    for (int i = lid; i < out_features; i += local_size) {
+        local_out[i] = 0.0f;
     }
+    barrier(CLK_LOCAL_MEM_FENCE);
 
-    float activation = weight * input_vector[col];
-    
-    // Pure sparse execution: skip the write if activation is zero
-    if (activation != 0.0f) {
-        atomic_add_float(&output_vector[row], activation);
+    // 2. Grid-Stride Loop: Threads chew through sparse chunks and add to L1 Cache
+    for (int i = gid; i < num_elements; i += global_size) {
+        ulong m_coord = morton_coords[i];
+        float weight = vload_half(i, sparse_weights_fp16); 
+
+        uint row = 0; uint col = 0;
+        for (int bit = 0; bit < 16; bit++) {
+            ulong shift = bit * 2; 
+            row |= (uint)(((m_coord >> (0 + shift)) & 1) << bit);
+            col |= (uint)(((m_coord >> (1 + shift)) & 1) << bit);
+        }
+
+        float activation = weight * input_vector[col];
+        if (activation != 0.0f) {
+            atomic_add_local_float(&local_out[row], activation);
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // 3. Collaborative Flush from L1 Cache back to Global VRAM
+    for (int i = lid; i < out_features; i += local_size) {
+        float val = local_out[i];
+        if (val != 0.0f) {
+            atomic_add_global_float(&output_vector[i], val);
+        }
     }
 }
 )";
@@ -52,9 +90,9 @@ void init_opencl() {
     program = clCreateProgramWithSource(context, 1, &SPMV_KERNEL_CODE, NULL, NULL);
     clBuildProgram(program, 1, &device, NULL, NULL, NULL);
     
-    spmv_kernel = clCreateKernel(program, "spmv_holo_weights", NULL);
+    spmv_kernel = clCreateKernel(program, "spmv_holo_weights_fast", NULL);
     is_initialized = true;
-    std::cout << "[Holoqubed C++] Pure Sparse-Serving OpenCL Engine Initialized.\n";
+    std::cout << "[Holoqubed C++] Pure Sparse Engine with L1 Wavefront Reduction Initialized.\n";
 }
 
 class NativeHoloLayer {
@@ -72,11 +110,9 @@ public:
         out_features = out_feat;
         num_elements = num_elem;
 
-        // Permanently pin the SPARSE data in VRAM. No dense inflation.
+        // VRAM Pinning (Pure Sparse)
         coords_buf = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, num_elements * sizeof(uint64_t), coords.data_ptr(), NULL);
         weights_buf = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, num_elements * sizeof(uint16_t), weights.data_ptr(), NULL);
-        
-        // Pre-allocate I/O buffers to prevent memory thrashing
         in_buf = clCreateBuffer(context, CL_MEM_READ_ONLY, in_features * sizeof(float), NULL, NULL);
         out_buf = clCreateBuffer(context, CL_MEM_READ_WRITE, out_features * sizeof(float), NULL, NULL);
     }
@@ -93,24 +129,33 @@ public:
         auto options = torch::TensorOptions().dtype(torch::kFloat32).device(input_vec.device());
         auto output_vec = torch::zeros({out_features}, options);
 
-        // Stream 1D input
         clEnqueueWriteBuffer(queue, in_buf, CL_FALSE, 0, in_features * sizeof(float), input_contig.data_ptr(), 0, NULL, NULL);
 
-        // Zero output buffer
         float zero = 0.0f;
         clEnqueueFillBuffer(queue, out_buf, &zero, sizeof(float), 0, out_features * sizeof(float), 0, NULL, NULL);
 
-        // Execute Pure Sparse Math
+        // Architecting the Grid: 60 Compute Units * 4 Workgroups per CU = 240
+        size_t local_size = 256;
+        size_t global_size = 240 * local_size; 
+        
+        // Safety cap if layer is extremely small
+        if (num_elements < global_size) {
+            global_size = ((num_elements / local_size) + 1) * local_size;
+        }
+
         clSetKernelArg(spmv_kernel, 0, sizeof(cl_mem), &coords_buf);
         clSetKernelArg(spmv_kernel, 1, sizeof(cl_mem), &weights_buf);
         clSetKernelArg(spmv_kernel, 2, sizeof(cl_mem), &in_buf);
         clSetKernelArg(spmv_kernel, 3, sizeof(cl_mem), &out_buf);
         clSetKernelArg(spmv_kernel, 4, sizeof(int), &num_elements);
+        clSetKernelArg(spmv_kernel, 5, sizeof(int), &out_features);
         
-        size_t global_work = num_elements;
-        clEnqueueNDRangeKernel(queue, spmv_kernel, 1, NULL, &global_work, NULL, 0, NULL, NULL);
+        // DYNAMIC LOCAL MEMORY ALLOCATION!
+        // We tell OpenCL to carve out 'out_features * 4 bytes' from the 64KB L1 cache
+        clSetKernelArg(spmv_kernel, 6, out_features * sizeof(float), NULL);
 
-        // Stream 1D output back
+        clEnqueueNDRangeKernel(queue, spmv_kernel, 1, NULL, &global_size, &local_size, 0, NULL, NULL);
+
         clEnqueueReadBuffer(queue, out_buf, CL_TRUE, 0, out_features * sizeof(float), output_vec.data_ptr(), 0, NULL, NULL);
 
         return output_vec;
