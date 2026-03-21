@@ -20,8 +20,6 @@ holo generate ext
 
 <img width="1805" height="418" alt="Screenshot from 2026-03-21 09-07-26" src="https://github.com/user-attachments/assets/bddb7399-1e54-40da-854e-8188441b723f" />
 
----
-
 python overhead visible in benchmark results 
 
 <img width="1915" height="75" alt="Screenshot from 2026-03-21 09-46-40" src="https://github.com/user-attachments/assets/cfa6411f-681d-49cf-b0b4-76d93e3c56ee" />
