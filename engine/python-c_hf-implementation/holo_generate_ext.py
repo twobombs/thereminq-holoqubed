@@ -10,7 +10,7 @@ import numpy as np
 import time
 import argparse
 import re
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
 import holo_ext
 from holo_loader import HoloQueryPlanner 
@@ -112,6 +112,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_id", type=str, required=True)
     parser.add_argument("--holo_file", type=str, required=True)
     parser.add_argument("--prompt", type=str, default="there is no spoon")
+    parser.add_argument("--max_tokens", type=int, default=100, help="Maximum number of tokens to generate")
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
@@ -132,24 +133,26 @@ if __name__ == "__main__":
     print("\n" + "="*50)
     print(f"PROMPT: {args.prompt}")
     print("="*50)
+    print("\n[GENERATING RESPONSE...]\n")
     
     inputs = tokenizer(args.prompt, return_tensors="pt")
+    
+    # Set up the streamer to output text as it generates
+    streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+    
     start_time = time.time()
     
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=40,
+            max_new_tokens=args.max_tokens,
             do_sample=True,
             temperature=0.7,
-            pad_token_id=config.pad_token_id
+            pad_token_id=config.pad_token_id,
+            streamer=streamer # <--- Plugged the streamer in here
         )
         
-    gen_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    
-    print("\n" + "="*50)
-    print(gen_text)
-    print("="*50)
+    print("\n\n" + "="*50)
     
     total_time = time.time() - start_time
     prompt_length = len(inputs['input_ids'][0])
