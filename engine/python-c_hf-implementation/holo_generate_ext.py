@@ -10,7 +10,7 @@ import numpy as np
 import time
 import argparse
 import re
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
 import holo_ext
 from holo_loader import HoloQueryPlanner 
@@ -112,6 +112,12 @@ if __name__ == "__main__":
     parser.add_argument("--model_id", type=str, required=True)
     parser.add_argument("--holo_file", type=str, required=True)
     parser.add_argument("--prompt", type=str, default="there is no spoon")
+    parser.add_argument("--max_tokens", type=int, default=100, help="Maximum number of tokens to generate")
+    
+    # New sampling parameters added here!
+    parser.add_argument("--temperature", type=float, default=0.7, help="Generation temperature (higher = more creative)")
+    parser.add_argument("--top_p", type=float, default=0.9, help="Top-p (nucleus) sampling threshold")
+    parser.add_argument("--top_k", type=int, default=50, help="Top-k sampling threshold")
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
@@ -132,24 +138,29 @@ if __name__ == "__main__":
     print("\n" + "="*50)
     print(f"PROMPT: {args.prompt}")
     print("="*50)
+    print("\n[GENERATING RESPONSE...]\n")
     
     inputs = tokenizer(args.prompt, return_tensors="pt")
+    
+    streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     start_time = time.time()
+    
+    # Determine if we should sample based on temperature
+    do_sample = args.temperature > 0.0
     
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=40,
-            do_sample=True,
-            temperature=0.7,
-            pad_token_id=config.pad_token_id
+            max_new_tokens=args.max_tokens,
+            do_sample=do_sample,
+            temperature=args.temperature if do_sample else 1.0, # HF models error if temp=0 with do_sample=True
+            top_p=args.top_p,
+            top_k=args.top_k,
+            pad_token_id=config.pad_token_id,
+            streamer=streamer
         )
         
-    gen_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    
-    print("\n" + "="*50)
-    print(gen_text)
-    print("="*50)
+    print("\n\n" + "="*50)
     
     total_time = time.time() - start_time
     prompt_length = len(inputs['input_ids'][0])
