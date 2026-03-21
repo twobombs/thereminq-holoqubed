@@ -10,6 +10,9 @@ Currently in the prototyping phase, the engine is built in Python (`PyOpenCL`,`L
 
 ---
 
+<img width="2816" height="1536" alt="565813044-a0313af8-5414-4d9e-9b81-1014f7df0376" src="https://github.com/user-attachments/assets/94cf7f51-56e4-49ab-854d-2fc944464465" />
+
+
 ## Core Architecture
 
 Traditional Large Language Models (LLMs) push massive weight matrices across the PCIe bus for every single token. HoloQubed bypasses this by translating neural pathways into physical memory space:
