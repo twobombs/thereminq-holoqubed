@@ -18,7 +18,7 @@ holo loader module
 holo generate ext 
 - the actual sparse inference script that loads and executes the query with some temperature and top variables that are optional
 
-<img width="1805" height="418" alt="Screenshot from 2026-03-21 09-07-26" src="https://github.com/user-attachments/assets/bddb7399-1e54-40da-854e-8188441b723f" />
+<img width="1910" height="635" alt="Screenshot from 2026-03-21 09-35-41" src="https://github.com/user-attachments/assets/d581bb07-71b1-469f-aedf-055a7f238b13" />
 
 python overhead visible in benchmark results 
 
