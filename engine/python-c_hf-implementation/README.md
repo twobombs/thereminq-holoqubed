@@ -1,4 +1,4 @@
-works with gguf and d34 models
+**works with gguf and d34 models**
 
 gguf/d34 holo graphic conversion from pt or gguf file
 - default is set to a fairly agressive 0.5 to test the cut 
