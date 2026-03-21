@@ -1,14 +1,18 @@
 works with gguf and d34 models
 
-gguf/d34 holo graphic conversion - default is set fairly agressive to test the cut - in actual runs you might want to put this at a lower level like 0.1
+gguf/d34 holo graphic conversion 
+- default is set fairly agressive 0.5 to test the cut 
+- in actual runs you might want to put this at a lower level like 0.1
 
 <img width="512" height="310" alt="Screenshot from 2026-03-16 10-17-25" src="https://github.com/user-attachments/assets/f9a81dba-d9bb-4efe-a950-326cb570189f" />
 
-holo loader module
+holo loader module 
+- also used by the inference script to load the model
 
 <img width="1074" height="683" alt="Screenshot from 2026-03-16 13-21-04" src="https://github.com/user-attachments/assets/4db458ce-56f6-49a8-9f04-5a00c3ae7ae6" />
 
 holo generate ext 
+- the actual sparse inference script that loads and executes the query with some temperature and top variables that are optional
 
 <img width="1805" height="418" alt="Screenshot from 2026-03-21 09-07-26" src="https://github.com/user-attachments/assets/bddb7399-1e54-40da-854e-8188441b723f" />
 
