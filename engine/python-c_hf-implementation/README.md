@@ -2,7 +2,7 @@
 
 gguf/d34 holo graphic conversion from pt or gguf file
 - default is set to a fairly agressive 0.5 to test the cut 
-- in actual runs you might want to put this at a lower level like 0.1
+- you might want to put this at a lower level like 0.1 for more coherency
 
 <img width="512" height="310" alt="Screenshot from 2026-03-16 10-17-25" src="https://github.com/user-attachments/assets/f9a81dba-d9bb-4efe-a950-326cb570189f" />
 
