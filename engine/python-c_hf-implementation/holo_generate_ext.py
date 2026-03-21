@@ -1,6 +1,6 @@
 """
 ThereminQ Holoqubed - Pure OpenCL Edition
-Scatters sparse Morton coordinates into dense OpenCL VRAM buffers during init, 
+Scatters sparse Morton coordinates into sparse OpenCL VRAM buffers during init, 
 and executes purely via OpenCL GEMV kernels to bypass CPU limitations.
 """
 

@@ -6,7 +6,7 @@
 
 ThereminQ HoloQubed is a radical departure from traditional dense neural network execution. Instead of relying on brute-force, dense matrix multiplications ($O(n^2)$) that bottleneck on compute cores and PCIe bandwidth, Holoqubed leverages high-speed memory bandwidth, $O(1)$ spatial coordinate lookups, and bit-interleaved geometric encoding to perform AI inference.
 
-Currently in the prototyping phase, the engine is built in Python (`PyOpenCL` + `Weed`) to map the mathematical abstractions before being ported to bare-metal C++ for absolute maximum PCIe Zero-Copy efficiency.
+Currently in the prototyping phase, the engine is built in Python (`PyOpenCL`,`Llama.cpp`+ future `Weed` implementations) to map the mathematical abstractions before being ported to bare-metal C++ for absolute maximum PCIe Zero-Copy efficiency.
 
 ---
 
