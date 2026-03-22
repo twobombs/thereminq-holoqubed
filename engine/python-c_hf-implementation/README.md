@@ -1,3 +1,5 @@
+<img width="1408" height="768" alt="1774127890823" src="https://github.com/user-attachments/assets/ec8245b7-b7cf-42cf-9913-fc5a16beae34" />
+
 **works with gguf and d34 models**
 
 gguf/d34 holo graphic conversion from pt or gguf file
