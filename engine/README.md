@@ -2,6 +2,9 @@
 
 This directory contains the core execution scripts and utilities for the ThereminQ Holoqubed AI inference engine.
 
+<img width="2752" height="1536" alt="unnamed (4)" src="https://github.com/user-attachments/assets/8adbf464-e9d2-49a7-a20b-d059af25f6d3" />
+
+
 ## Subdirectories
 
 *   **`concept/`**: Contains conceptual prototypes and verification harnesses (e.g., prototype PyOpenCL loom, Hugging Face monkey-patching). See `concept/README.md`.
