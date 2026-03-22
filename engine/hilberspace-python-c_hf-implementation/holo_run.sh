@@ -1,0 +1,1 @@
+python3 holo_generate_ext.py   --model_id twobombs/nanochat-d34-sft-hf   --holo_file model_169150.holo   --max_tokens 40   --temperature 0.1   --phases "0,15,30,45,60,75,90,105,120,135,150,165,180,195,210,225,240,255,270,285,300,315,330,345"
