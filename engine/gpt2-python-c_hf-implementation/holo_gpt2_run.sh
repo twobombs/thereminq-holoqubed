@@ -1,0 +1,1 @@
+python3 holo_generate_ext.py   --model_id twobombs/gpt2  --holo_file gpt2-pytorch_model.holo --max_tokens 40   --temperature 0   --gpus 2   --phases 0,45,90,180

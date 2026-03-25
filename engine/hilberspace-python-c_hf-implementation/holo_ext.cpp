@@ -75,31 +75,49 @@ __kernel void spmv_hilbert_quantum_batched(
 void init_opencl() {
     if (is_initialized) return;
     
-    // Grab the primary platform (e.g., AMD or NVIDIA depending on your OpenCL ICD priority)
+    // 1. Query the TOTAL number of platforms available
     cl_uint numPlatforms; 
-    clGetPlatformIDs(1, NULL, &numPlatforms);
-    cl_platform_id platform; 
-    clGetPlatformIDs(1, &platform, NULL);
+    clGetPlatformIDs(0, NULL, &numPlatforms);
+    if (numPlatforms == 0) {
+        std::cerr << "[Holoqubed C++] No OpenCL platforms found!\n";
+        return;
+    }
     
-    cl_uint num_devices;
-    clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, MAX_GPUS, devices, &num_devices);
-    num_active_gpus = num_devices;
+    std::vector<cl_platform_id> platforms(numPlatforms);
+    clGetPlatformIDs(numPlatforms, platforms.data(), NULL);
     
-    for(int i = 0; i < num_active_gpus; i++) {
-        contexts[i] = clCreateContext(NULL, 1, &devices[i], NULL, NULL, NULL);
+    num_active_gpus = 0;
+    
+    // 2. Iterate through ALL platforms to hunt for GPUs
+    for (cl_uint p = 0; p < numPlatforms; p++) {
+        cl_uint num_devices;
+        cl_int err = clGetDeviceIDs(platforms[p], CL_DEVICE_TYPE_GPU, 0, NULL, &num_devices);
         
+        if (err != CL_SUCCESS || num_devices == 0) continue;
+        
+        std::vector<cl_device_id> platform_devices(num_devices);
+        clGetDeviceIDs(platforms[p], CL_DEVICE_TYPE_GPU, num_devices, platform_devices.data(), NULL);
+        
+        for (cl_uint d = 0; d < num_devices && num_active_gpus < MAX_GPUS; d++) {
+            devices[num_active_gpus] = platform_devices[d];
+            
+            contexts[num_active_gpus] = clCreateContext(NULL, 1, &devices[num_active_gpus], NULL, NULL, NULL);
+            
 #ifdef CL_VERSION_2_0
-        queues[i] = clCreateCommandQueueWithProperties(contexts[i], devices[i], 0, NULL);
+            queues[num_active_gpus] = clCreateCommandQueueWithProperties(contexts[num_active_gpus], devices[num_active_gpus], 0, NULL);
 #else
-        queues[i] = clCreateCommandQueue(contexts[i], devices[i], 0, NULL);
+            queues[num_active_gpus] = clCreateCommandQueue(contexts[num_active_gpus], devices[num_active_gpus], 0, NULL);
 #endif
-        // Compile the program specifically for this device's context
-        programs[i] = clCreateProgramWithSource(contexts[i], 1, &SPMV_KERNEL_CODE, NULL, NULL);
-        clBuildProgram(programs[i], 1, &devices[i], NULL, NULL, NULL);
+            // Compile the program specifically for this device's context
+            programs[num_active_gpus] = clCreateProgramWithSource(contexts[num_active_gpus], 1, &SPMV_KERNEL_CODE, NULL, NULL);
+            clBuildProgram(programs[num_active_gpus], 1, &devices[num_active_gpus], NULL, NULL, NULL);
+            
+            num_active_gpus++;
+        }
     }
     
     is_initialized = true;
-    std::cout << "[Holoqubed C++] Multi-GPU Cluster Initialized. Found " << num_active_gpus << " GPUs on primary platform.\n";
+    std::cout << "[Holoqubed C++] Multi-GPU Cluster Initialized. Found " << num_active_gpus << " GPUs across " << numPlatforms << " platforms.\n";
 }
 
 class NativeHoloLayer {
@@ -113,8 +131,8 @@ public:
         out_features = out_feat; 
         num_elements = num_elem;
         
-        // Wrap around safely if Python asks for a GPU index higher than what OpenCL found
-        target_gpu = gpu_id % num_active_gpus; 
+        // Wrap around safely, avoiding modulo by zero if OpenCL initialization failed
+        target_gpu = gpu_id % (num_active_gpus > 0 ? num_active_gpus : 1); 
         
         // Allocate buffers specifically in the targeted GPU's VRAM context
         rows_buf = clCreateBuffer(contexts[target_gpu], CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, num_elements * sizeof(uint32_t), rows.data_ptr(), NULL);

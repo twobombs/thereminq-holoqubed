@@ -32,10 +32,6 @@ def rot(n, x, y, rx, ry):
 
 @njit(parallel=True)
 def map_to_hilbert(rows, cols, grid_size):
-    """
-    Vectorized Hilbert Curve mapping. 
-    Converts 2D (row, col) coordinates into a 1D continuous spatial distance.
-    """
     num_elements = len(rows)
     distances = np.zeros(num_elements, dtype=np.uint64)
     
@@ -64,23 +60,13 @@ def get_next_power_of_2(n):
 # =============================================================================
 
 def apply_complex_phase(magnitudes: np.ndarray, rows: np.ndarray, cols: np.ndarray, mode: str):
-    """
-    Casts the real-valued magnitudes into Complex Cartesian space (Real + Imaginary)
-    W = A * cos(theta) + i * A * sin(theta)
-    """
     if mode == "flatland":
-        # Baseline execution: Phase is 0. All energy is in the Real component.
         return magnitudes.astype(np.float32), np.zeros_like(magnitudes, dtype=np.float32)
         
     elif mode == "quantum":
-        # Experimental: Deterministic spatial phase shift. 
-        # Modulates the phase angle based on the weight's physical position in the matrix.
-        # This will create interference patterns when passed through the SpMV.
         theta = np.mod(rows + cols, 2 * np.pi).astype(np.float32)
-        
         w_real = magnitudes * np.cos(theta)
         w_imag = magnitudes * np.sin(theta)
-        
         return w_real.astype(np.float32), w_imag.astype(np.float32)
 
 # =============================================================================
@@ -101,7 +87,6 @@ def forge_layer_worker(name: str, data: np.ndarray, is_bypassed: bool, std_facto
     compressor = zstandard.ZstdCompressor(level=zstd_level)
     
     if is_bypassed:
-        # Bypassed layers (Embeddings, LayerNorm, etc.) stay in flat FP32
         dense_data = data.astype(np.float32)
         result["surv_params"] = dense_data.size
         
@@ -115,7 +100,6 @@ def forge_layer_worker(name: str, data: np.ndarray, is_bypassed: bool, std_facto
         result["log"] = f"  [BYPASSED] {name} | Saved as Zstd Dense (Flatland FP32)"
         return result
 
-    # --- THE DYNAMIC SCALPEL ---
     abs_data = np.abs(data)
     layer_std = np.std(data) + 1e-8 
     
@@ -131,32 +115,26 @@ def forge_layer_worker(name: str, data: np.ndarray, is_bypassed: bool, std_facto
         result["log"] = f"  [DELETED] {name} (100% Sparsity)"
         return result
 
-    # Extract 2D Spatial Coordinates
     dense_indices = np.argwhere(mask)
     if dense_indices.shape[1] != 2:
-        # Fallback for 1D biases caught in the net
         rows = np.zeros(len(dense_indices), dtype=np.uint32)
         cols = dense_indices[:, 0].astype(np.uint32)
     else:
         rows = dense_indices[:, 0].astype(np.uint32)
         cols = dense_indices[:, 1].astype(np.uint32)
 
-    # --- HILBERT MAPPING ---
     max_dim = max(data.shape[0] if len(data.shape) > 0 else 1, data.shape[1] if len(data.shape) > 1 else 1)
     grid_size = get_next_power_of_2(max_dim)
     
     hilbert_distances = map_to_hilbert(rows, cols, grid_size)
     
-    # Sort everything by the continuous 1D Hilbert topological curve
     sort_order = np.argsort(hilbert_distances)
     sorted_rows = rows[sort_order]
     sorted_cols = cols[sort_order]
     sorted_weights = surviving_weights[sort_order]
     
-    # --- PHASE INJECTION ---
     w_real, w_imag = apply_complex_phase(sorted_weights, sorted_rows, sorted_cols, phase_mode)
     
-    # Compress and pack the explicitly decoupled geometry and complex amplitudes
     arrays_to_pack = {
         "rows": sorted_rows,
         "cols": sorted_cols,
@@ -188,10 +166,8 @@ def forge_layer_worker(name: str, data: np.ndarray, is_bypassed: bool, std_facto
 
 def run_geometry_forge(input_path: str, output_path: str, args):
     print(f"Igniting Geometry Forge: Loading {input_path}...")
-    
     tensor_iterator = None
 
-    # --- TRI-LOADER LOGIC ---
     if input_path.lower().endswith('.gguf'):
         try:
             reader = gguf.GGUFReader(input_path)
@@ -215,7 +191,6 @@ def run_geometry_forge(input_path: str, output_path: str, args):
                         yield SafetensorsAdapter(key, f.get_tensor(key))
             
             tensor_iterator = st_tensor_generator()
-            
         except ImportError:
             raise ImportError("Please install safetensors to use this format: pip install safetensors")
         except Exception as e:
@@ -229,23 +204,19 @@ def run_geometry_forge(input_path: str, output_path: str, args):
             try:
                 state_dict = torch.load(input_path, map_location="cpu", mmap=True, weights_only=True)
             except RuntimeError as e:
-                # Catch the legacy format error
                 if "mmap can only be used" in str(e) or "_use_new_zipfile_serialization" in str(e):
                     print("Legacy PyTorch format detected. Falling back to standard RAM load (mmap=False)...")
                     state_dict = torch.load(input_path, map_location="cpu", mmap=False, weights_only=True)
                 else:
                     raise e
             
-            # Simple mock class to mimic GGUF tensor attributes for the worker loop
             class PyTorchTensorAdapter:
                 def __init__(self, name, data):
                     self.name = name
                     self.data = data
 
-            # Generator yields tensors one-by-one to preserve OOM protection
             def pt_tensor_generator():
                 for name, tensor in state_dict.items():
-                    # Safely extract to numpy FP32
                     if tensor.dtype == torch.bfloat16 or tensor.dtype == torch.float16:
                         yield PyTorchTensorAdapter(name, tensor.float().numpy())
                     else:
@@ -272,12 +243,18 @@ def run_geometry_forge(input_path: str, output_path: str, args):
                 bypass_keywords = ["embd", "embed", "wte", "output", "lm_head"]
                 is_bypassed = len(tensor.data.shape) < 2 or any(k in name.lower() for k in bypass_keywords)
                 
-                # NumPy decodes raw bytes; assure FP32 conversion
                 data = tensor.data
                 if data.dtype == np.uint8 or data.dtype == np.uint16:
                     data = data.view(np.float16).astype(np.float32)
                 else:
                     data = data.astype(np.float32)
+                
+                # --- PRE-FORGE TRANSPOSE FIX ---
+                # GPT-2 uses Conv1D. We mathematically transpose the dense matrix here 
+                # so the Hilbert mapping naturally aligns with SpMV execution expectations.
+                is_conv1d_layer = "c_attn" in name or "c_proj" in name or "c_fc" in name
+                if is_conv1d_layer and not is_bypassed and len(data.shape) == 2:
+                    data = data.T 
                 
                 future = executor.submit(forge_layer_worker, name, data, is_bypassed, args.std_factor, args.max_sparsity, args.zstd_level, args.phase_mode)
                 futures.append(future)
