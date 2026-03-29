@@ -1,8 +1,13 @@
 import os
+import subprocess
 
 ggml_c_path = "llama.cpp/ggml/src/ggml.c"
 
-os.system(f"cd llama.cpp && git checkout {ggml_c_path.replace('llama.cpp/', '')} && cd ..")
+subprocess.run(
+    ["git", "checkout", ggml_c_path.replace('llama.cpp/', '')],
+    cwd="llama.cpp",
+    check=True
+)
 
 with open(ggml_c_path, "r") as f:
     code = f.read()

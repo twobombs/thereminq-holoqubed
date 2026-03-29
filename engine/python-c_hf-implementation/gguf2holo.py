@@ -63,12 +63,12 @@ def encode_morton_vectorized(dense_indices: np.ndarray, tensor_shape: tuple, chu
         
         for dim in range(num_dims):
             val = chunk[:, dim]
-            spread_val = np.zeros_like(val)
-            
-            for bit in range(bits_per_dim):
-                spread_val |= ((val >> bit) & 1) << (bit * num_dims)
+            shifts = np.arange(bits_per_dim, dtype=np.uint64)
+            masks = (val[:, None] >> shifts) & 1
+            spread_vals = masks << (shifts * num_dims)
+            spread_val = np.bitwise_xor.reduce(spread_vals, axis=1)
                 
-            chunk_coords |= (spread_val << dim)
+            chunk_coords ^= (spread_val << dim)
             
         spatial_coords[start:end] = chunk_coords
         

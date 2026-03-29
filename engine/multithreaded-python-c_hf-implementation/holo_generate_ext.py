@@ -114,6 +114,7 @@ def inject_holographic_pathways(module: nn.Module, planner: HoloQueryPlanner, pr
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_id", type=str, required=True)
+    parser.add_argument("--trust_remote_code", action="store_true", default=False, help="Allow remote code execution")
     parser.add_argument("--holo_file", type=str, required=True)
     parser.add_argument("--prompt", type=str, default="there is no spoon", help="Prompt to run across all threads")
     parser.add_argument("--threads", type=int, default=5, help="Number of concurrent generation threads")
@@ -123,8 +124,8 @@ if __name__ == "__main__":
     parser.add_argument("--top_k", type=int, default=50, help="Top-k sampling threshold")
     args = parser.parse_args()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
-    config = AutoConfig.from_pretrained(args.model_id, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=args.trust_remote_code)
+    config = AutoConfig.from_pretrained(args.model_id, trust_remote_code=args.trust_remote_code)
     if hasattr(config, "text_config"):
         for k, v in (config.text_config.items() if isinstance(config.text_config, dict) else config.text_config.__dict__.items()):
             if not hasattr(config, k): setattr(config, k, v)
@@ -138,7 +139,7 @@ if __name__ == "__main__":
         config=config, 
         torch_dtype=torch.float32, 
         low_cpu_mem_usage=True,
-        trust_remote_code=True
+        trust_remote_code=args.trust_remote_code
     )
     
     holo_ext.init_opencl()
