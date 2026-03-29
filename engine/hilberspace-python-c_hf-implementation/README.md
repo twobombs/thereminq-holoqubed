@@ -8,3 +8,6 @@ This directory contains the implementation for Hilberspace with Python and C++ i
 * `holo_generate_ext.py`: Text generation engine using OpenCL extension.
 * `holo_loader.py`: Ingress loader and CPU Query Planner.
 * `holo_setup.py`: Standard setup script for building and installing the C++ PyTorch extension.
+
+<img width="2000" height="992" alt="Xh5t8" src="https://github.com/user-attachments/assets/8be58f30-99b3-4fbf-9f9b-89235e9c7fe8" />
+<img width="1927" height="2000" alt="IcgXt (1)" src="https://github.com/user-attachments/assets/b9916e6b-a0b0-4603-b1dd-722ab55bf6ca" />
