@@ -44,17 +44,41 @@ def get_current_branch():
 
 def get_conflicting_files():
     """Finds all files currently in a conflicted state."""
-    # diff-filter=U gets unmerged files
     output = run_git_command(["diff", "--name-only", "--diff-filter=U"])
     if not output:
         return []
     return output.split('\n')
 
+def detect_merge_state():
+    """Detects if a merge is in progress and identifies the source/target branches."""
+    try:
+        git_dir = run_git_command(["rev-parse", "--git-dir"])
+        merge_head_path = os.path.join(git_dir, "MERGE_HEAD")
+        merge_msg_path = os.path.join(git_dir, "MERGE_MSG")
+        
+        if not os.path.exists(merge_head_path):
+            return None, None
+        
+        target = get_current_branch()
+        source = "unknown-branch"
+        
+        # Extract source branch from the auto-generated MERGE_MSG
+        if os.path.exists(merge_msg_path):
+            with open(merge_msg_path, "r", encoding="utf-8") as f:
+                msg = f.read()
+                match = re.search(r"Merge branch '([^']+)'", msg)
+                if match:
+                    source = match.group(1)
+        
+        return target, source
+    except Exception as e:
+        print(f"⚠️ Could not detect merge state: {e}")
+        return None, None
+
 # --- 3. THE AI RESOLUTION ENGINE ---
 def clean_llm_output(text):
     """Strips markdown code blocks to prevent corrupting the source files."""
     text = text.strip()
-    # Remove standard markdown code blocks
     text = re.sub(r'^```[\w]*\n', '', text, flags=re.MULTILINE)
     text = re.sub(r'\n```$', '', text, flags=re.MULTILINE)
     return text
@@ -93,7 +117,7 @@ def resolve_file_with_ai(file_path):
                 {"role": "system", "content": "You are a code merging engine. Output raw code only."},
                 {"role": "user", "content": reasoner_prompt}
             ],
-            max_tokens=8192 # Increased for large code files
+            max_tokens=8192 
         )
         draft = reasoning_response.choices[0].message.content
     except Exception as e:
@@ -125,12 +149,10 @@ def resolve_file_with_ai(file_path):
         print(f"   ❌ [Orchestrator Error]: {e}")
         return False
 
-    # Check for failure states
     if "<<<<<<<" in final_code or "=======" in final_code:
         print("   ❌ [Error] AI failed to remove conflict markers. Manual intervention required.")
         return False
 
-    # Write the fixed content back to the file
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(final_code)
@@ -141,45 +163,41 @@ def resolve_file_with_ai(file_path):
         return False
 
 # --- 4. THE WORKFLOW ---
-def perform_ai_merge(target_branch, source_branch):
+def perform_ai_merge(target_branch, source_branch, merge_in_progress=False):
     print("🤖 Starting AI-Driven Git Merge")
     print("=" * 40)
     
-    # Ensure working directory is clean before starting
-    status = run_git_command(["status", "--porcelain"])
-    if status:
-        print("❌ Your working directory is not clean. Please commit or stash your changes first.")
-        sys.exit(1)
-
-    # Create the new branch name
     safe_source = source_branch.replace("/", "-")
     safe_target = target_branch.replace("/", "-")
     merge_branch_name = f"ai-merge-{safe_source}-into-{safe_target}"
 
-    print(f"🔄 Setting up branches...")
-    print(f"   Target: {target_branch}")
-    print(f"   Source: {source_branch}")
-    
-    # Checkout target and pull latest (assuming local exists, otherwise adjust)
-    run_git_command(["checkout", target_branch])
-    
-    # Create and checkout the new isolation branch
-    print(f"🌿 Creating isolated branch: {merge_branch_name}")
-    run_git_command(["checkout", "-b", merge_branch_name])
+    if not merge_in_progress:
+        # If no merge is happening, start from scratch
+        status = run_git_command(["status", "--porcelain"])
+        if status:
+            print("❌ Your working directory is not clean. Please commit or stash your changes first.")
+            sys.exit(1)
 
-    # Attempt the merge
-    print(f"🔀 Attempting standard git merge of '{source_branch}'...")
-    merge_output = run_git_command(["merge", source_branch], check=False)
+        print(f"🔄 Setting up branches...")
+        run_git_command(["checkout", target_branch])
+        print(f"🌿 Creating isolated branch: {merge_branch_name}")
+        run_git_command(["checkout", "-b", merge_branch_name])
+        print(f"🔀 Attempting standard git merge of '{source_branch}'...")
+        run_git_command(["merge", source_branch], check=False)
+    else:
+        # If a merge is actively failing, move the broken state to a new branch safely
+        print(f"⚠️ Actively fixing current merge: '{source_branch}' into '{target_branch}'")
+        print(f"🌿 Shifting conflicted state to isolated branch: {merge_branch_name}")
+        run_git_command(["checkout", "-b", merge_branch_name])
 
     conflicting_files = get_conflicting_files()
     
     if not conflicting_files:
-        print("✅ Merge completed successfully with no conflicts! Branch is ready.")
+        print("✅ Merge state is clean. No conflicts found.")
         sys.exit(0)
 
     print(f"⚠️ Conflicts detected in {len(conflicting_files)} file(s). Engaging AI Resolver...")
     
-    # Process each conflicted file
     resolution_failures = 0
     for file_path in conflicting_files:
         success = resolve_file_with_ai(file_path)
@@ -200,12 +218,23 @@ def perform_ai_merge(target_branch, source_branch):
 
 # --- 5. CLI EXECUTION ---
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python ai_merge.py <target_branch> <source_branch>")
-        print("Example: python ai_merge.py main feature/new-ui")
+    # Zero-argument mode: Auto-detect existing conflicts
+    if len(sys.argv) == 1:
+        target_b, source_b = detect_merge_state()
+        if target_b and source_b:
+            perform_ai_merge(target_b, source_b, merge_in_progress=True)
+        else:
+            print("❌ No active merge conflict detected. Either start a merge, or provide branches manually:")
+            print("Usage: python ai_merge.py [target_branch] [source_branch]")
+            sys.exit(1)
+            
+    # Manual mode: Pass branches directly
+    elif len(sys.argv) == 3:
+        target_b = sys.argv[1]
+        source_b = sys.argv[2]
+        perform_ai_merge(target_b, source_b, merge_in_progress=False)
+        
+    else:
+        print("Usage: python ai_merge.py [target_branch] [source_branch]")
+        print("Run without arguments during a conflict to auto-detect branches.")
         sys.exit(1)
-
-    target = sys.argv[1]
-    source = sys.argv[2]
-    
-    perform_ai_merge(target, source)
