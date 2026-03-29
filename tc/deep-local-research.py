@@ -42,7 +42,7 @@ def perform_web_search(query):
         if not results:
             return "No results found."
 
-        combined_content = ""
+        combined_content_parts = []
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         
         # Domains our text-scraper should avoid (JS-heavy or video platforms)
@@ -87,10 +87,10 @@ def perform_web_search(query):
             except requests.exceptions.RequestException:
                 text = f"Connection error. Snippet fallback: {snippet}"
             
-            combined_content += f"\n\n--- Source: {title} ---\nURL: {url}\nCONTENT:\n{text}\n"
+            combined_content_parts.append(f"\n\n--- Source: {title} ---\nURL: {url}\nCONTENT:\n{text}\n")
             valid_pages_scraped += 1
 
-        return combined_content
+        return "".join(combined_content_parts)
 
     except Exception as e:
         return f"Search Error: {str(e)}"
@@ -156,7 +156,7 @@ def run_orchestration_loop(user_query):
 
     # STEP B: Reasoning (Streaming + Leash)
     print("\n🧠 [Reasoner] Processing deep logic (Live Draft):\n" + "-"*50)
-    draft = ""
+    draft_parts = []
     try:
         reasoning_stream = reason_client.chat.completions.create(
             model="qwen-3.5-35b",
@@ -175,11 +175,12 @@ def run_orchestration_loop(user_query):
                 if hasattr(delta, 'content') and delta.content:
                     sys.stdout.write(delta.content)
                     sys.stdout.flush()
-                    draft += delta.content
+                    draft_parts.append(delta.content)
                     
     except Exception as e:
         print(f"\n[Reasoner Error]: {str(e)}")
 
+    draft = "".join(draft_parts)
     print("\n" + "-"*50)
     
     # Fallback if 35B failed to output anything
@@ -203,7 +204,7 @@ def run_orchestration_loop(user_query):
     CRITICAL RULE: DO NOT include meta-commentary, audit notes, or explain your grading process. Output ONLY the final, polished report intended for the user.
     """
 
-    verification = ""
+    verification_parts = []
     try:
         verification_stream = orch_client.chat.completions.create(
             model="nemotron-orchestrator-8b",
@@ -220,11 +221,12 @@ def run_orchestration_loop(user_query):
                 if hasattr(delta, 'content') and delta.content:
                     sys.stdout.write(delta.content)
                     sys.stdout.flush()
-                    verification += delta.content
+                    verification_parts.append(delta.content)
                     
     except Exception as e:
         print(f"\n[Orchestrator Error]: {str(e)}")
         
+    verification = "".join(verification_parts)
     print("\n" + "="*50)
 
     return verification

@@ -117,17 +117,18 @@ def inject_holographic_pathways(module: nn.Module, planner: HoloQueryPlanner, ct
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ThereminQ Holoqubed - Text Generation")
     parser.add_argument("--model_id", type=str, required=True, help="Hugging Face Model ID (e.g., Qwen/Qwen3.5-9B)")
+    parser.add_argument("--trust_remote_code", action="store_true", default=False, help="Allow remote code execution")
     parser.add_argument("--holo_file", type=str, required=True, help="Path to your .holo file")
     parser.add_argument("--prompt", type=str, default="The future of artificial intelligence is", help="Text to generate from")
     args = parser.parse_args()
 
     print("1. Loading PyTorch/Hugging Face ecosystem...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=args.trust_remote_code)
     
     # ---------------------------------------------------------
     # THE FIX: Dynamic Config Bubble-Up
     # ---------------------------------------------------------
-    config = AutoConfig.from_pretrained(args.model_id, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(args.model_id, trust_remote_code=args.trust_remote_code)
     
     if hasattr(config, "text_config"):
         print("   -> Multimodal Config detected. Bubbling up text_config attributes...")
@@ -150,7 +151,7 @@ if __name__ == "__main__":
         config=config, 
         dtype=torch.float32, 
         low_cpu_mem_usage=True,
-        trust_remote_code=True
+        trust_remote_code=args.trust_remote_code
     )
     
     print("\n2. Booting Holoqubed Engine & OpenCL...")
