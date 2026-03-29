@@ -3,6 +3,7 @@ import sys
 import subprocess
 import openai
 import re
+import argparse
 
 # --- 1. CONFIGURATION ---
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://192.168.2.134:8033/v1")
@@ -42,6 +43,21 @@ def run_git_command(args, check=True):
 def get_current_branch():
     return run_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
 
+def list_local_branches():
+    """Scans and prints all local git branches."""
+    print("🔍 Scanning local repository for branches...\n")
+    output = run_git_command(["branch", "--format=%(refname:short)"])
+    if output:
+        branches = output.split('\n')
+        current = get_current_branch()
+        for branch in branches:
+            if branch == current:
+                print(f"  👉 * {branch} (current)")
+            else:
+                print(f"     {branch}")
+    else:
+        print("⚠️ No branches found or not a git repository.")
+
 def get_conflicting_files():
     """Finds all files currently in a conflicted state."""
     output = run_git_command(["diff", "--name-only", "--diff-filter=U"])
@@ -64,7 +80,7 @@ def detect_merge_state():
         
         # Extract source branch from the auto-generated MERGE_MSG
         if os.path.exists(merge_msg_path):
-            with open(merge_msg_path, "r", encoding="utf-8") as f:
+            with open(merge_msg_path, "r", encoding="utf-8", errors="ignore") as f:
                 msg = f.read()
                 match = re.search(r"Merge branch '([^']+)'", msg)
                 if match:
@@ -77,11 +93,18 @@ def detect_merge_state():
 
 # --- 3. THE AI RESOLUTION ENGINE ---
 def clean_llm_output(text):
-    """Strips markdown code blocks to prevent corrupting the source files."""
+    """Extracts code from markdown blocks to prevent corrupting the source files."""
     text = text.strip()
+    
+    # Safely extract code if the LLM wrapped it in markdown, ignoring conversational text
+    match = re.search(r'```[a-zA-Z]*\n(.*?)```', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+        
+    # Fallback stripping if the match fails but backticks exist
     text = re.sub(r'^```[\w]*\n', '', text, flags=re.MULTILINE)
     text = re.sub(r'\n```$', '', text, flags=re.MULTILINE)
-    return text
+    return text.strip()
 
 def resolve_file_with_ai(file_path):
     """Reads a conflicted file, sends it to the Reasoner and Orchestrator, and writes the fix."""
@@ -90,6 +113,14 @@ def resolve_file_with_ai(file_path):
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
+    except UnicodeDecodeError:
+        print(f"⚠️ UTF-8 decode failed for {file_path}, falling back to latin-1.")
+        try:
+            with open(file_path, "r", encoding="latin-1") as f:
+                content = f.read()
+        except Exception as e:
+            print(f"⚠️ Could not read {file_path}: {e}")
+            return False
     except Exception as e:
         print(f"⚠️ Could not read {file_path}: {e}")
         return False
@@ -154,6 +185,7 @@ def resolve_file_with_ai(file_path):
         return False
 
     try:
+        # Write back using the same encoding that succeeded, defaulting to utf-8
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(final_code)
         print(f"   ✅ Successfully resolved and saved {file_path}")
@@ -188,7 +220,10 @@ def perform_ai_merge(target_branch, source_branch, merge_in_progress=False):
         # If a merge is actively failing, move the broken state to a new branch safely
         print(f"⚠️ Actively fixing current merge: '{source_branch}' into '{target_branch}'")
         print(f"🌿 Shifting conflicted state to isolated branch: {merge_branch_name}")
-        run_git_command(["checkout", "-b", merge_branch_name])
+        try:
+            run_git_command(["checkout", "-b", merge_branch_name])
+        except SystemExit:
+            print(f"⚠️ Git prevented branch creation during conflict. Remaining on '{target_branch}'.")
 
     conflicting_files = get_conflicting_files()
     
@@ -218,23 +253,32 @@ def perform_ai_merge(target_branch, source_branch, merge_in_progress=False):
 
 # --- 5. CLI EXECUTION ---
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="AI-Driven Git Merge Conflict Resolver")
+    parser.add_argument("target_branch", nargs="?", help="The branch you want to merge INTO")
+    parser.add_argument("source_branch", nargs="?", help="The branch you want to merge FROM")
+    parser.add_argument("-s", "--scan", action="store_true", help="Scan and list all local branches")
+    
+    args = parser.parse_args()
+
+    if args.scan:
+        list_local_branches()
+        sys.exit(0)
+
+    # Manual mode: Pass branches directly
+    if args.target_branch and args.source_branch:
+        perform_ai_merge(args.target_branch, args.source_branch, merge_in_progress=False)
+        
     # Zero-argument mode: Auto-detect existing conflicts
-    if len(sys.argv) == 1:
+    elif not args.target_branch and not args.source_branch:
         target_b, source_b = detect_merge_state()
         if target_b and source_b:
             perform_ai_merge(target_b, source_b, merge_in_progress=True)
         else:
-            print("❌ No active merge conflict detected. Either start a merge, or provide branches manually:")
-            print("Usage: python ai_merge.py [target_branch] [source_branch]")
+            print("❌ No active merge conflict detected. Either start a merge, or provide branches manually.")
+            print("To see available commands, run: python ai_merge.py --help")
             sys.exit(1)
             
-    # Manual mode: Pass branches directly
-    elif len(sys.argv) == 3:
-        target_b = sys.argv[1]
-        source_b = sys.argv[2]
-        perform_ai_merge(target_b, source_b, merge_in_progress=False)
-        
     else:
-        print("Usage: python ai_merge.py [target_branch] [source_branch]")
-        print("Run without arguments during a conflict to auto-detect branches.")
+        print("❌ Error: You must provide BOTH a target and source branch, or provide NONE to auto-detect a conflict.")
+        print("To see available commands, run: python ai_merge.py --help")
         sys.exit(1)
