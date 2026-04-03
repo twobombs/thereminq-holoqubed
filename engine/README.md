@@ -12,4 +12,4 @@ This directory contains the core execution scripts and utilities for the Theremi
 
 ## Files
 
-*   `holo_check.py`: Ingress Loader & Simulator. Simulates the CPU Query Planner loading layers from a `.holo` dictionary and executes a direct OpenCL Sparse Matrix-Vector Multiplication (SpMV) in VRAM to verify the OpenCL execution pipeline.
+*   `holo_check.py`: Ingress Loader & Simulator. It acts as an OpenCL SpMV simulator and validation tool. Specifically, it simulates the CPU Query Planner loading layers from a compressed `.holo` dictionary (via `zstandard` reading from a ZIP archive) and executes direct OpenCL Sparse Matrix-Vector Multiplication (SpMV) in VRAM. It validates hardware detection via `pyopencl`, performs ultra-fast O(log N) pathway lookups, and mocks the execution of a spatial cloud of active coordinates to verify mathematical execution correctness and memory requirements prior to full pipeline integration.
