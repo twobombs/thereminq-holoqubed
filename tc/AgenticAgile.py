@@ -2,8 +2,6 @@ import os
 import time
 import json
 import queue
-import requests
-import threading
 import concurrent.futures
 from datetime import datetime
 
@@ -79,7 +77,7 @@ class LLMClusterManager:
                 elif is_orchestrator:
                     result = "## Daily Synthesis\n### Progress\nAPI Updates planned.\n### Risk\nMissing tests."
                 else:
-                    result = f"- Extracted raw context: Frontend pushed, backend changed API, tests missing."
+                    result = "- Extracted raw context: Frontend pushed, backend changed API, tests missing."
                 
                 if not is_orchestrator:
                     self.worker_pool.put(endpoint)
@@ -282,7 +280,7 @@ def generate_daily_synthesis():
     if success:
         with open(WIKI_SYNTHESIS_FILE, "w") as f:
             f.write(response)
-        print(f" [+] Synthesis complete: Dashboard updated.")
+        print(" [+] Synthesis complete: Dashboard updated.")
 
 # ==============================================================================
 # Main Execution Pipeline

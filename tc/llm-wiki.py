@@ -142,7 +142,7 @@ def main():
         raw_files.extend(RAW_DIR.rglob(ext))
         
     if not raw_files:
-        print(f"No source files found. Drop documents into 'raw/articles' or 'raw/papers' and run again.")
+        print("No source files found. Drop documents into 'raw/articles' or 'raw/papers' and run again.")
         return
 
     # Sequentially process all found files

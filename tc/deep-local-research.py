@@ -238,7 +238,7 @@ if __name__ == "__main__":
         print(f"🚀 [System] Custom CLI query: '{user_prompt}'")
     else:
         user_prompt = "research on the negative energy spike when teleporting a qubit according to ER=EPR and devise a strategy to execute the thesis on a quantum computer that shows that ER=EPR is an example of quantum gravity"
-        print(f"🏠 [System] Default mode: Deep Research Test...")
+        print("🏠 [System] Default mode: Deep Research Test...")
 
     try:
         final_result = run_orchestration_loop(user_prompt)
