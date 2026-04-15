@@ -46,11 +46,16 @@ Runs a dense `llama.cpp` reference model side-by-side with the sparse `.holo` en
 
 ## 🧰 Tool Cupboard (`tc/`)
 
-A collection of auxiliary utilities and autonomous workflows.
+A collection of auxiliary utilities and autonomous workflows for the ThereminQ Holoqubed project.
 
-### Deep Local Research (`tc/deep-local-research.py`)
+### Files
 
-An autonomous research script powered by local LLMs (orchestrator and reasoning models). It performs deep web scraping via DuckDuckGo (filtering out video/image sites), executes a multi-step analysis (Tool Planning, Reasoning, Verification), and outputs a formatted PDF report.
+*   `deep-local-research.py`: An autonomous local LLM web research script. Powered by local LLMs (orchestrator and reasoning models via external endpoints), it performs deep web scraping via DuckDuckGo (filtering out video/image sites like YouTube and TikTok), executes a multi-step analysis (Tool Planning, Reasoning, Verification), and outputs a formatted PDF report using `fpdf`. It incorporates streaming inference and safe truncations to manage context windows effectively.
+*   `git-compare-and-merge.py`: AI-Driven Git Merge Conflict Resolver. A script that detects git merge conflicts and delegates resolution to local AI models. It reads conflicted files, identifies git conflict markers (`<<<<<<<`, `=======`), sends the file to a Reasoner model to intelligently draft a resolution, and then passes it to an Orchestrator model to verify code integrity and ensure marker removal before automatically writing the resolved file back to disk.
+*   `AgenticAgile.py`: Agentic Project Orchestration pipeline. Utilizing the Google Gemini API (`gemini-1.5-pro`), it manages a "Living Wiki" by continuously ingesting raw transcripts (e.g., mock Slack logs) and extracting actionable tasks, architectural decisions, and blockers. It includes an Agentic Linter to verify `ACTIVE_TASKS.md` against project rules (`DEFINITION_OF_DONE.md`), generating automated linting reports, and finally synthesizes an Automated Daily Agile Dashboard summarizing progress, risks, and velocity adjustments.
+*   `local-discord-bot.py`: A simple integration bridging a local Discord bot (via `discord.py`) to a local LLM. The bot responds to direct mentions, asynchronously querying a local server (e.g., `llama-server` on port 8033) via `asyncio.to_thread` to ensure non-blocking interactions while streaming AI responses seamlessly into Discord channels.
+*   `llm-wiki.py`: An automated knowledge compiler for an LLM Wiki. It uses an OpenAI-compatible local API to read raw source text files (`.txt`, `.md`, `.csv`) and synthesizes them into structured Markdown wiki pages with YAML frontmatter. It also dynamically routes files to appropriate directories based on type and manages an index and log of ingested documents.
+*   `mcp-workspace-bridge.py`: A FastMCP server script acting as a bridge to the local workspace. It exposes read-only resources (Agile project state, Wiki index, Daily Synthesis) and actionable tools (document ingestion, local orchestrator query) over standard input/output (stdio) for secure external client access.
 
 ---
 
