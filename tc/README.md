@@ -11,6 +11,7 @@ A collection of auxiliary utilities and autonomous workflows for the ThereminQ H
 *   `llm-wiki.py`: An automated knowledge compiler for an LLM Wiki. It uses an OpenAI-compatible local API to read raw source text files (`.txt`, `.md`, `.csv`) and synthesizes them into structured Markdown wiki pages with YAML frontmatter. It also dynamically routes files to appropriate directories based on type and manages an index and log of ingested documents.
 *   `mcp-workspace-bridge.py`: A FastMCP server script acting as a bridge to the local workspace. It exposes read-only resources (Agile project state, Wiki index, Daily Synthesis) and actionable tools (document ingestion, local orchestrator query) over standard input/output (stdio) for secure external client access.
 
+<img width="2816" height="1536" alt="Gemini_Generated_Image_3cnxrm3cnxrm3cnx" src="https://github.com/user-attachments/assets/100a743b-a893-42b5-8e37-3dbc221ed72f" />
 <img width="2816" height="1536" alt="Gemini_Generated_Image_j6xa7dj6xa7dj6xa" src="https://github.com/user-attachments/assets/db95e0fa-c8bb-4e96-9aac-9c9224aa1ed2" />
 <img width="2816" height="1536" alt="gemini_generated_image_j0jsqnj0jsqnj0js" src="https://github.com/user-attachments/assets/79406291-6eba-4621-aebd-387f852a714a" />
 <img width="2528" height="1696" alt="gemini_generated_image_x8xdflx8xdflx8xd" src="https://github.com/user-attachments/assets/62637080-7f76-4b5f-b701-04d35eceb793" />
