@@ -1,155 +1,138 @@
 import os
+import sys
+import argparse
+import time
 import re
-import datetime
+from datetime import datetime
 from pathlib import Path
 from openai import OpenAI
 
-# Initialize client to hit your existing local llama-server
+# ==============================================================================
+# Configuration
+# ==============================================================================
+
+# Initialize client to hit your local llama-server
 client = OpenAI(
-    base_url=os.getenv("OPENAI_API_BASE", "http://localhost:8080/v1"),
+    base_url=os.getenv("OPENAI_API_BASE", "http://localhost:8033/v1"),
     api_key=os.getenv("OPENAI_API_KEY", "sk-local")
 )
 
-# 1. Setup Directories based on the Idea File Architecture
-BASE_DIR = Path(".")
-RAW_DIR = BASE_DIR / "raw"
-WIKI_DIR = BASE_DIR / "wiki"
+LLM_MODEL = os.getenv("LLM_MODEL", "local-model")
 
-# Immutable source layer subdirectories
-for sub in ["articles", "papers", "repos", "assets"]:
-    (RAW_DIR / sub).mkdir(parents=True, exist_ok=True)
+SYSTEM_PROMPT = """You are an expert researcher and technical writer.
+Your task is to write a comprehensive, detailed, and highly informative document based on the user's prompt. 
+Write clearly, use markdown formatting (headings, bullet points, bold text), and provide deep insights.
+Do not include any conversational filler (e.g., "Here is the article you requested"). Just output the raw document content."""
 
-# Mutable wiki layer subdirectories
-for sub in ["concepts", "entities", "sources", "comparisons"]:
-    (WIKI_DIR / sub).mkdir(parents=True, exist_ok=True)
+# ==============================================================================
+# Helper Functions
+# ==============================================================================
 
-# Core operational files
-INDEX_FILE = WIKI_DIR / "index.md"
-LOG_FILE = WIKI_DIR / "log.md"
-OVERVIEW_FILE = WIKI_DIR / "overview.md"
+def setup_raw_directory(base_dir: str, category: str) -> Path:
+    """Ensures the target raw subdirectory exists."""
+    target_dir = Path(base_dir) / category
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir
 
-for file in [INDEX_FILE, LOG_FILE, OVERVIEW_FILE]:
-    if not file.exists():
-        file.touch()
-
-# 2. Schema / System Prompt matching the Idea File
-SCHEMA_INSTRUCTIONS = """You are an automated knowledge compiler for an LLM Wiki.
-Your job is to read raw source text and synthesize it into a structured Markdown wiki page.
-Output ONLY the raw markdown with YAML frontmatter. Do not include conversational filler or explanations of what you are doing.
-
-Every wiki page MUST have YAML frontmatter exactly matching this format:
----
-title: [A concise, descriptive title]
-type: [Must be exactly one of: concept, entity, source-summary, comparison]
-sources: [[The filename of the source provided]]
-related: [[List of potential related wiki pages]]
-created: [Today's Date]
-updated: [Today's Date]
-confidence: [high, medium, or low]
----
-
-Following the frontmatter, write the markdown content. Use well-structured headings, bullet points, and clear paragraphs to summarize the insights, contradictions, and key concepts from the source. Make it highly readable as a standalone wiki page.
-"""
-
-def log_ingest(filename: str, title: str, doc_type: str):
-    """Appends an operational log of the ingestion event."""
-    date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"- **{date_str}**: Ingested `{filename}` -> Created [{title}] (Type: {doc_type})\n")
-
-def update_index(title: str, rel_path: str):
-    """Appends the new page to the master index."""
-    with open(INDEX_FILE, "a", encoding="utf-8") as f:
-        f.write(f"- [{title}]({rel_path})\n")
-
-def compile_document(source_path: Path):
-    print(f"Ingesting {source_path.name}...")
+def generate_safe_filename(prompt_text: str) -> str:
+    """Creates a unique, safe filename using a timestamp and a snippet of the prompt."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    with open(source_path, "r", encoding="utf-8") as f:
-        content = f.read()
+    # Grab the first 5 words of the prompt to use as a slug
+    words = re.findall(r'[a-zA-Z0-9]+', prompt_text)[:5]
+    slug = "-".join(words).lower()
+    
+    if not slug:
+        slug = "generated-content"
+        
+    return f"{timestamp}_{slug}.md"
 
-    today = datetime.datetime.now().strftime("%Y-%m-%d")
-    prompt = f"Compile the following raw document into a structured wiki page. Today's date is {today}. Source filename: {source_path.name}\n\n{content}"
+def generate_content(prompt: str, target_dir: Path):
+    """Streams the LLM generation to the console and saves the final output."""
+    print(f"\n[1] 🧠 Generating content for: '{prompt[:50]}...'")
+    print(f"[2] 📡 Streaming response from local LLM...\n")
+    print("-" * 60)
+    
+    full_content = ""
+    start_time = time.time()
     
     try:
         response = client.chat.completions.create(
-            # Change "local-model" to the alias used by your llama-server instance if different
-            model="local-model", 
+            model=LLM_MODEL,
             messages=[
-                {"role": "system", "content": SCHEMA_INSTRUCTIONS},
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1,
-            max_tokens=2048
+            temperature=0.7, # A bit of creativity is good for raw generation
+            max_tokens=4096,
+            stream=True
         )
         
-        wiki_content = response.choices[0].message.content.strip()
-        
-        # Strip markdown wrappers if the LLM hallucinated them
-        if wiki_content.startswith("```markdown"):
-            wiki_content = wiki_content[11:]
-        if wiki_content.endswith("```"):
-            wiki_content = wiki_content[:-3]
-        wiki_content = wiki_content.strip()
-            
-        # Parse frontmatter to dynamically determine type and title
-        doc_type = "sources" # default fallback
-        title = source_path.stem
-        
-        # Made regex more forgiving for leading spaces/newlines generated by the LLM
-        frontmatter_match = re.search(r"---\n(.*?)\n---", wiki_content, re.DOTALL)
-        if frontmatter_match:
-            fm = frontmatter_match.group(1)
-            type_match = re.search(r"^type:\s*(.+)$", fm, re.MULTILINE)
-            title_match = re.search(r"^title:\s*(.+)$", fm, re.MULTILINE)
-            
-            if type_match:
-                parsed_type = type_match.group(1).strip().lower()
-                # Route the file to the correct directory based on the parsed type
-                if "concept" in parsed_type: doc_type = "concepts"
-                elif "entity" in parsed_type: doc_type = "entities"
-                elif "comparison" in parsed_type: doc_type = "comparisons"
-                else: doc_type = "sources"
+        for chunk in response:
+            if chunk.choices[0].delta.content is not None:
+                text_chunk = chunk.choices[0].delta.content
+                print(text_chunk, end="", flush=True)
+                full_content += text_chunk
                 
-            if title_match:
-                # Strip surrounding quotes if the LLM added them
-                title = title_match.group(1).strip().replace('"', '').replace("'", "")
+        print("\n" + "-" * 60)
         
-        # Format the final markdown filename safely
-        safe_title = re.sub(r'[^a-zA-Z0-9\-_]', '-', title.lower())
-        output_filename = f"{safe_title}.md"
-        output_path = WIKI_DIR / doc_type / output_filename
+        elapsed = round(time.time() - start_time, 2)
+        print(f"\n[+] Generation complete in {elapsed} seconds.")
         
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(wiki_content)
+        # Save to file
+        filename = generate_safe_filename(prompt)
+        filepath = target_dir / filename
+        
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(full_content.strip())
             
-        print(f"Successfully compiled to {output_path}")
-        
-        # Execute secondary operations: Logging and Indexing
-        rel_path = f"{doc_type}/{output_filename}"
-        log_ingest(source_path.name, title, doc_type)
-        update_index(title, rel_path)
-        
+        print(f"[3] 💾 Saved raw content to: {filepath.absolute()}")
+
     except Exception as e:
-        print(f"Error compiling {source_path.name}: {e}")
+        print(f"\n[!] Fatal Error during generation: {e}")
+
+# ==============================================================================
+# Execution
+# ==============================================================================
 
 def main():
-    print("Starting LLM Wiki Ingestion Pipeline...")
+    parser = argparse.ArgumentParser(description="Local LLM Raw Content Generator")
     
-    # Gather all readable raw files from the source subdirectories
-    raw_files = []
-    for ext in ["*.txt", "*.md", "*.csv"]:
-        raw_files.extend(RAW_DIR.rglob(ext))
+    # Input group (mutually exclusive)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("-p", "--prompt", type=str, help="Direct string prompt for the LLM to write about.")
+    group.add_argument("-f", "--file", type=str, help="Path to a text file containing the prompt instructions.")
+    
+    # Destination arguments
+    parser.add_argument("-d", "--dir", type=str, default="raw", 
+                        help="Base directory for raw files. (Default: ./raw)")
+    parser.add_argument("-c", "--category", type=str, default="articles", 
+                        choices=["articles", "papers", "repos", "assets"],
+                        help="Subdirectory category inside the raw folder. (Default: articles)")
+    
+    args = parser.parse_args()
+    
+    # Resolve the prompt text
+    if args.file:
+        file_path = Path(args.file)
+        if not file_path.exists():
+            print(f"[!] Error: The prompt file '{args.file}' does not exist.")
+            sys.exit(1)
+        with open(file_path, "r", encoding="utf-8") as f:
+            target_prompt = f.read().strip()
+        print(f"[*] Loaded prompt from file: {args.file}")
+    else:
+        target_prompt = args.prompt
         
-    if not raw_files:
-        print(f"No source files found. Drop documents into 'raw/articles' or 'raw/papers' and run again.")
-        return
+    if not target_prompt:
+        print("[!] Error: The provided prompt is empty.")
+        sys.exit(1)
 
-    # Sequentially process all found files
-    for file_path in raw_files:
-        compile_document(file_path)
-        
-    print("Ingestion complete. Open the 'wiki/' folder in an editor like Obsidian to view.")
+    # Setup directories
+    target_directory = setup_raw_directory(args.dir, args.category)
+    
+    # Execute generation
+    generate_content(target_prompt, target_directory)
 
 if __name__ == "__main__":
     main()
