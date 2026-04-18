@@ -4,6 +4,8 @@ import json
 import time
 import re
 import argparse
+from datetime import datetime
+from pathlib import Path
 from openai import OpenAI
 
 # ==============================================================================
@@ -49,7 +51,6 @@ Example: ["micro piece 1", "micro piece 2", "micro piece 3"]"""
         try:
             start_time = time.time()
             
-            # Enable streaming on the API call
             response = client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=[
@@ -58,21 +59,19 @@ Example: ["micro piece 1", "micro piece 2", "micro piece 3"]"""
                 ],
                 temperature=0.7, 
                 max_tokens=4096,
-                stream=True # <--- Streaming enabled
+                stream=True,
+                timeout=300.0
             )
             
             print("    [~] Streaming Live Generation:\n    >> ", end="", flush=True)
             
-            # Iterate through the incoming stream chunks
             for chunk in response:
                 if chunk.choices[0].delta.content is not None:
                     text_chunk = chunk.choices[0].delta.content
-                    # Print to console immediately without a newline
                     print(text_chunk, end="", flush=True)
-                    # Accumulate for our JSON parser
                     raw_output += text_chunk
             
-            print("\n") # Add a newline after the stream finishes typing
+            print("\n") 
             
             cleaned_output = extract_json_array(raw_output)
             
@@ -103,32 +102,44 @@ Example: ["micro piece 1", "micro piece 2", "micro piece 3"]"""
     return []
 
 # ==============================================================================
-# Utility: File Output
+# Utility: Scatter Export
 # ==============================================================================
 
-def export_to_manifest(pieces: list, filename: str = "atomic_manifest.json"):
-    """Saves the fragmented pieces to a manifest for the orchestrator to consume."""
+def export_to_split_files(pieces: list, original_query: str):
+    """
+    Shatters the queue into individual markdown files.
+    This creates natively parallel targets for the downstream Agile Agent.
+    """
     if not pieces:
         print("    [!] No pieces to export. Pipeline halted.")
         return
         
-    os.makedirs("wiki/manifests", exist_ok=True)
-    filepath = os.path.join("wiki/manifests", filename)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Create a dedicated batch directory inside /raw so things don't get messy
+    batch_dir = Path(f"raw/decomposed_batch_{timestamp}")
+    batch_dir.mkdir(parents=True, exist_ok=True)
     
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump({
-            "total_pieces": len(pieces),
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "atomic_queue": pieces
-        }, f, indent=4)
+    print(f"\n[3] 💾 PIPELINE INTEGRATION: Scattering tasks to individual files...")
+    
+    for idx, piece in enumerate(pieces, start=1):
+        # Generate sequentially numbered files (e.g., task_001.md, task_002.md)
+        filename = f"task_{idx:03d}.md"
+        filepath = batch_dir / filename
         
-    print(f"\n[3] 💾 EXPORT: Saved atomic manifest to {filepath}")
-    
-    print("\n    --- Sample of Micro-Pieces ---")
-    for i, piece in enumerate(pieces[:5]): 
-        print(f"    {i+1}. {piece}")
-    if len(pieces) > 5:
-        print(f"    ... and {len(pieces) - 5} more.")
+        # We append the original context to the bottom of the file so the 
+        # downstream agent knows *why* it's doing this micro-task.
+        markdown_content = f"# Micro-Task {idx:03d}\n\n"
+        markdown_content += f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        markdown_content += f"## Actionable Task\n"
+        markdown_content += f"> {piece.strip()}\n\n"
+        markdown_content += f"---\n## Parent Context\n"
+        markdown_content += f"```text\n{original_query.strip()}\n```\n"
+        
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(markdown_content)
+            
+    print(f"    [+] Distributed {len(pieces)} distinct files to {batch_dir.absolute()}/")
+    print("    [~] These files are now ready for parallel pickup by your worker nodes.")
 
 # ==============================================================================
 # Execution
@@ -168,6 +179,6 @@ if __name__ == "__main__":
     print("=== STARTING ATOMIC DECOMPOSER ===")
     
     fragments = decompose_to_atomic_pieces(target_query)
-    export_to_manifest(fragments)
+    export_to_split_files(fragments, target_query)
     
     print("\n=== PIPELINE FINISHED ===")
