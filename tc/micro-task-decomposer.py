@@ -105,7 +105,7 @@ Example: ["micro piece 1", "micro piece 2", "micro piece 3"]"""
 # Utility: Scatter Export
 # ==============================================================================
 
-def export_to_split_files(pieces: list, original_query: str):
+def export_to_split_files(pieces: list):
     """
     Shatters the queue into individual markdown files.
     This creates natively parallel targets for the downstream Agile Agent.
@@ -126,19 +126,13 @@ def export_to_split_files(pieces: list, original_query: str):
         filename = f"task_{idx:03d}.md"
         filepath = batch_dir / filename
         
-        # We append the original context to the bottom of the file so the 
-        # downstream agent knows *why* it's doing this micro-task.
-        markdown_content = f"# Micro-Task {idx:03d}\n\n"
-        markdown_content += f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        markdown_content += f"## Actionable Task\n"
-        markdown_content += f"> {piece.strip()}\n\n"
-        markdown_content += f"---\n## Parent Context\n"
-        markdown_content += f"```text\n{original_query.strip()}\n```\n"
+        # Keep it completely atomic. Only write the specific micro-task.
+        markdown_content = f"{piece.strip()}\n"
         
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(markdown_content)
             
-    print(f"    [+] Distributed {len(pieces)} distinct files to {batch_dir.absolute()}/")
+    print(f"    [+] Distributed {len(pieces)} truly atomic files to {batch_dir.absolute()}/")
     print("    [~] These files are now ready for parallel pickup by your worker nodes.")
 
 # ==============================================================================
@@ -179,6 +173,6 @@ if __name__ == "__main__":
     print("=== STARTING ATOMIC DECOMPOSER ===")
     
     fragments = decompose_to_atomic_pieces(target_query)
-    export_to_split_files(fragments, target_query)
+    export_to_split_files(fragments)
     
     print("\n=== PIPELINE FINISHED ===")
