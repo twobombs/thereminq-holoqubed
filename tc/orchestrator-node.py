@@ -164,3 +164,50 @@ Merge these separate reports into a single, cohesive, well-formatted final respo
 Resolve any contradictions between the workers smoothly, remove redundancies, and directly answer the user's original query."""
 
     user_prompt = f"""ORIGINAL QUERY: {original_query}
+
+WORKER REPORTS:
+{consolidated_context}
+"""
+
+    try:
+        response = orch_client.chat.completions.create(
+            model=ORCHESTRATOR_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.5,
+            max_tokens=2048
+        )
+        
+        final_answer = response.choices[0].message.content.strip()
+        print("    [+] Synthesis complete.")
+        return final_answer
+        
+    except Exception as e:
+        print(f"    [!] Error during synthesis: {e}")
+        return f"Synthesis Phase Failed. Orchestrator Error: {str(e)}"
+
+# ==============================================================================
+# Main Execution / Entry Point
+# ==============================================================================
+
+if __name__ == "__main__":
+    print("=== Local LLM Orchestrator Pipeline Initialized ===")
+    
+    # Example Query to trigger the orchestration
+    sample_query = "Explain the architecture of a Transformer model, provide a basic Python snippet of self-attention, and discuss its primary hardware constraints."
+    
+    # 1. Decompose the problem
+    tasks = decompose_query(sample_query)
+    
+    # 2 & 3. Dispatch to worker nodes and gather results
+    worker_results = dispatch_and_gather(tasks)
+    
+    # 4. Synthesize everything back together
+    final_output = synthesize_results(sample_query, worker_results)
+    
+    print("\n==============================================================================")
+    print("✨ FINAL SYNTHESIZED OUTPUT ✨\n")
+    print(final_output)
+    print("\n==============================================================================")
