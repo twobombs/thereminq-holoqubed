@@ -99,7 +99,9 @@ class LLMClusterManager:
         for attempt in range(max_retries):
             try:
                 print(f"      -> [LLM Cluster] Sending Request to: {endpoint}...")
-                response = requests.post(endpoint, json=payload, timeout=120)
+                
+                # INCREASED TIMEOUT: 300 seconds (5 minutes) to accommodate slower local hardware
+                response = requests.post(endpoint, json=payload, timeout=300)
                 response.raise_for_status()
                 
                 result = response.json()['choices'][0]['message']['content'].strip()
@@ -185,7 +187,6 @@ def ingest_and_merge_source(source_path: Path) -> bool:
 
     if not raw_tasks_list:
         print(f" [~] No actionable signals found in {source_path.name}. Marking as processed.")
-        # We return True here so it gets indexed and isn't retried infinitely
         return True 
 
     # Phase 2: Context-Aware Orchestrator Merge
@@ -225,7 +226,7 @@ NEW SIGNALS FROM {source_path.name}:
                     
             print(f" [+] Reconciliation complete for {source_path.name}.")
             save_state(state)
-            return True # Successfully merged
+            return True 
             
         except Exception as e:
             print(f" [!] JSON Parse Error during merge: {e}")
@@ -258,10 +259,8 @@ def generate_daily_synthesis():
 if __name__ == "__main__":
     print("=== STARTING DEEP-SCAN AGENTIC CONTROL LOOP ===")
     
-    # 1. Load the index of already processed files
     processed_files = load_processed_index()
     
-    # 2. Identify all files recursively in /raw
     extensions = ("*.txt", "*.md", "*.csv")
     raw_files = []
     for ext in extensions:
@@ -272,28 +271,20 @@ if __name__ == "__main__":
     else:
         new_files_processed = 0
         
-        # 3. Process every file
         for file_path in raw_files:
-            # Check if we already processed this file
-            # Extracting just the relative path name and stripping the timestamp from our index logic check
             rel_path = file_path.relative_to(RAW_DIR).as_posix()
-            
-            # Check if this rel_path is part of any line in our processed set
             is_processed = any(rel_path in indexed_line for indexed_line in processed_files)
             
             if is_processed:
                 print(f" [~] Skipping {rel_path} (Already in RAWINDEX.md)")
                 continue
                 
-            # If new, run the ingestion
             success = ingest_and_merge_source(file_path)
             
-            # If successful, mark it so we don't do it again tomorrow
             if success:
                 mark_file_processed(file_path)
                 new_files_processed += 1
         
-        # 4. Only generate a new synthesis if we actually processed new files
         if new_files_processed > 0:
             generate_daily_synthesis()
         else:
