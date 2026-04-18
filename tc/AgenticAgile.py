@@ -4,7 +4,6 @@ import time
 import json
 import queue
 import requests
-import threading
 import concurrent.futures
 from datetime import datetime
 from pathlib import Path
@@ -13,12 +12,13 @@ from pathlib import Path
 # Configuration & Directory Setup
 # ==============================================================================
 
-RAW_DIR = Path("raw")
-WIKI_DIR = Path("wiki")
+# Uses environment variables if set, otherwise defaults to local directories.
+RAW_DIR = Path(os.getenv("RAW_DIR", "raw"))
+WIKI_DIR = Path(os.getenv("WIKI_DIR", "wiki"))
 
 # Ensure base directories exist
-RAW_DIR.mkdir(exist_ok=True)
-WIKI_DIR.mkdir(exist_ok=True)
+RAW_DIR.mkdir(parents=True, exist_ok=True)
+WIKI_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_FILE = WIKI_DIR / "project_state.json"
 WIKI_SYNTHESIS_FILE = WIKI_DIR / "DAILY_SYNTHESIS.md"
@@ -50,19 +50,19 @@ def save_state(state):
         json.dump(state, f, indent=4)
 
 def load_processed_index() -> set:
-    """Loads the set of already processed files from RAWINDEX.md."""
+    """Loads the set of already processed file paths from RAWINDEX.md."""
     processed = set()
     if RAW_INDEX_FILE.exists():
         with open(RAW_INDEX_FILE, "r", encoding="utf-8") as f:
             for line in f:
                 if line.startswith("- "):
-                    # Extract the relative path stored in the bullet point
-                    processed.add(line[2:].strip())
+                    # Extract just the relative path before the separator
+                    rel_path = line[2:].split(" | Processed:")[0].strip()
+                    processed.add(rel_path)
     return processed
 
 def mark_file_processed(file_path: Path):
     """Appends a successfully processed file to RAWINDEX.md."""
-    # Store the path relative to RAW_DIR so it works across different machines
     rel_path = file_path.relative_to(RAW_DIR).as_posix()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
@@ -100,7 +100,6 @@ class LLMClusterManager:
             try:
                 print(f"      -> [LLM Cluster] Sending Request to: {endpoint}...")
                 
-                # INCREASED TIMEOUT: 300 seconds (5 minutes) to accommodate slower local hardware
                 response = requests.post(endpoint, json=payload, timeout=300)
                 response.raise_for_status()
                 
@@ -168,13 +167,14 @@ def dispatch_jobs_in_chunks(large_text, prompt_template, system_prompt=""):
 
 def ingest_and_merge_source(source_path: Path) -> bool:
     """Reads a file, merges insights, and returns True if successful."""
-    print(f"\n[*] INGESTING: {source_path.name}...")
+    rel_path = source_path.relative_to(RAW_DIR)
+    print(f"\n[*] Processing file: {rel_path}...")
     
     try:
         with open(source_path, "r", encoding="utf-8") as f:
             raw_content = f.read()
     except Exception as e:
-        print(f" [!] Error reading {source_path}: {e}")
+        print(f" [!] Error reading {rel_path}: {e}")
         return False
 
     # Phase 1: Distributed Extraction
@@ -186,11 +186,11 @@ def ingest_and_merge_source(source_path: Path) -> bool:
         state["failed_chunks"].extend(extraction_failures)
 
     if not raw_tasks_list:
-        print(f" [~] No actionable signals found in {source_path.name}. Marking as processed.")
+        print(f" [~] No actionable signals found in {rel_path}. Marking as processed.")
         return True 
 
     # Phase 2: Context-Aware Orchestrator Merge
-    print(f"[*] MERGING: Orchestrator reconciling signals from {source_path.name}...")
+    print(f"[*] MERGING: Orchestrator reconciling signals from {rel_path}...")
     
     existing_tasks_context = json.dumps(list(state["tasks"].values()), indent=2)
     new_signals_context = "\n".join(raw_tasks_list)
@@ -224,7 +224,7 @@ NEW SIGNALS FROM {source_path.name}:
                     task["last_source"] = source_path.name
                     state["tasks"][slug] = task
                     
-            print(f" [+] Reconciliation complete for {source_path.name}.")
+            print(f" [+] Reconciliation complete for {rel_path}.")
             save_state(state)
             return True 
             
@@ -232,7 +232,7 @@ NEW SIGNALS FROM {source_path.name}:
             print(f" [!] JSON Parse Error during merge: {e}")
             return False
             
-    print(f" [!] Orchestrator failed to merge signals for {source_path.name}.")
+    print(f" [!] Orchestrator failed to merge signals for {rel_path}.")
     return False
 
 def generate_daily_synthesis():
@@ -257,7 +257,8 @@ def generate_daily_synthesis():
 # ==============================================================================
 
 if __name__ == "__main__":
-    print("=== STARTING DEEP-SCAN AGENTIC CONTROL LOOP ===")
+    print(f"=== STARTING DEEP-SCAN AGENTIC CONTROL LOOP ===")
+    print(f"[*] Target Raw Directory: {RAW_DIR.absolute()}")
     
     processed_files = load_processed_index()
     
@@ -273,9 +274,9 @@ if __name__ == "__main__":
         
         for file_path in raw_files:
             rel_path = file_path.relative_to(RAW_DIR).as_posix()
-            is_processed = any(rel_path in indexed_line for indexed_line in processed_files)
             
-            if is_processed:
+            # Efficient O(1) set lookup
+            if rel_path in processed_files:
                 print(f" [~] Skipping {rel_path} (Already in RAWINDEX.md)")
                 continue
                 
