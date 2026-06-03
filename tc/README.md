@@ -47,6 +47,20 @@ A collection of auxiliary utilities and autonomous workflows for the ThereminQ H
 **Functional Description:** A master node script that handles high-level task decomposition and parallel synthesis across multiple worker nodes.
 **Internal Workings:** It receives complex user queries and uses an orchestrator model to break them down into independent sub-tasks. Utilizing Python's `concurrent.futures`, it dispatches these sub-tasks to multiple parallel worker node endpoints. Once all worker threads complete, it synthesizes the disjointed worker outputs into a single, cohesive, final response.
 
+### `start-zerg-swarm.sh`
+**Functional Description:** A bash script that orchestrates the initialization of a local 6-node LLM swarm.
+**Internal Workings:** It launches multiple `llama-server` instances in the background, utilizing `numactl` to strictly pin each process to specific NUMA nodes. This optimizes memory affinity and PCIe bus utilization while mapping the instances to a predetermined array of local API ports for the swarm topology.
+
+## Cohesive Swarm Workflow (Startup Sequence)
+
+To create a fully cohesive local AI ecosystem, start the scripts in the following logical sequence:
+
+1. **Infrastructure:** Execute `start-zerg-swarm.sh` to ignite the underlying LLM swarm, ensuring all local API endpoints (e.g., ports 8030-8035) are online and ready to accept requests.
+2. **Orchestration:** Launch `orchestrator-node.py` (which leverages `micro-task-decomposer.py`) to establish the master routing and task breakdown capabilities across the swarm.
+3. **Project State & Knowledge:** Run `AgenticAgile.py` and `llm-wiki.py` to ingest new context, update the agile state (`project_state.json`), and compile the structured wiki.
+4. **Integrations & Interfaces:** Start bridge services like `mcp-workspace-bridge.py` and `Atlassian-suite.py` to expose local state to external tools, and run `local-discord-bot.py` to provide a conversational interface.
+5. **On-Demand Utilities:** Use scripts like `deep-local-research.py`, `git-compare-and-merge.py`, or `a1111-status-visualizer.py` as needed for specific tasks, leveraging the established infrastructure.
+
 ## Architecture Visuals
 
 <img width="2816" height="1536" alt="Gemini_Generated_Image_3cnxrm3cnxrm3cnx" src="https://github.com/user-attachments/assets/100a743b-a893-42b5-8e37-3dbc221ed72f" />
