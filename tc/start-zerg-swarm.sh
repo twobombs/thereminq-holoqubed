@@ -56,6 +56,7 @@ for node_config in "${SWARM[@]}"; do
     --chat-template-kwargs '{"preserve_thinking": true}' \
     --host 0.0.0.0 \
     --port ${PORT} \
+    --tools all \
     --fit off > "${LOG_DIR}/vulkan${VULKAN_ID}_port${PORT}.log" 2>&1 &
 done
 
