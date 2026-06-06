@@ -4,62 +4,92 @@ A collection of auxiliary utilities and autonomous workflows for the ThereminQ H
 
 ## Scripts
 
-### `deep-local-research.py`
-**Functional Description:** An autonomous local LLM web research script that conducts deep web scraping to synthesize complex technical reports. It filters out unwanted formats (e.g., video/image sites like YouTube and TikTok) and outputs a formatted PDF report using `fpdf`.
-**Internal Workings:** It employs a multi-step analysis workflow powered by local LLM endpoints (an Orchestrator model and a Reasoning model).
-1. **Tool Planning:** The Orchestrator plans the search strategy and invokes a deep web scraper (`perform_web_search`) utilizing DuckDuckGo (`ddgs`) with `concurrent.futures.ThreadPoolExecutor` for parallelized fetching.
-2. **Reasoning:** A large reasoning model (e.g., qwen-3.5-35b) drafts a live response from the scraped facts using streaming inference to manage context sizes safely.
-3. **Verification:** The Orchestrator edits and polishes the draft into a final PDF report.
+### Build & Infrastructure (`0-build/`, `1-runinfra/`)
 
-### `git-compare-and-merge.py`
-**Functional Description:** An AI-Driven Git Merge Conflict Resolver that detects merge conflicts within files and delegates intelligent resolution to local AI models.
-**Internal Workings:** It reads conflicted files, identifies git conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`), and sends the conflicting blocks to a Reasoner model to intelligently draft a resolution based on the surrounding context. It then passes the resolved file to an Orchestrator model to verify code integrity and ensure all conflict markers are fully removed before automatically writing the clean, resolved file back to disk.
+*   **`0-build/build_llama.sh`**
+    **Functional Description:** Automates the fetching, compilation, and setup of the `llama.cpp` inference engine.
+    **Internal Workings:** Installs required build tools, clones the `llama.cpp` repository, configures it with Vulkan support via CMake, builds it, and creates multiple distinct directory copies (`llama.cpp-embedded`, `llama.orch`) to support isolated node execution in the swarm.
 
-### `AgenticAgile.py`
-**Functional Description:** An Agentic Project Orchestration pipeline that manages a "Living Wiki" by continuously ingesting raw transcripts and extracting actionable project state.
-**Internal Workings:** It utilizes a local OpenAI-compatible API endpoint with multithreaded chunk processing (`concurrent.futures.ThreadPoolExecutor`) to parse raw logs (e.g., mock Slack logs). It extracts tasks, architectural decisions, and blockers, saving the state to `project_state.json`. It includes an Agentic Linter to verify `ACTIVE_TASKS.md` against project rules (`DEFINITION_OF_DONE.md`), generating automated linting reports, and ultimately synthesizes an Automated Daily Agile Dashboard summarizing progress, risks, and velocity adjustments.
+*   **`0-build/fetch_llamas.sh`**
+    **Functional Description:** A simple fetch script to download the requisite GGUF models from Hugging Face.
+    **Internal Workings:** Uses `wget` to pull down specific pre-quantized reasoning, orchestration, and embedding models (e.g., Qwen, Nemotron, Nomic).
 
-### `local-discord-bot.py`
-**Functional Description:** A lightweight integration bridging a local Discord bot to a local LLM server to provide a conversational AI assistant within a Discord server.
-**Internal Workings:** It uses the `discord.py` library to listen for direct mentions or specific commands. To ensure non-blocking interactions and keep the Discord bot responsive, it wraps requests to the local LLM server (e.g., via port 8033) in `asyncio.to_thread`. It seamlessly streams the AI's generated responses back into the Discord channel.
+*   **`1-runinfra/launch27B.sh`**
+    **Functional Description:** A targeted launch script for a large 27B parameter LLM.
+    **Internal Workings:** Launches `llama-server` bound to specific NUMA nodes utilizing `numactl` and running on Vulkan2, specifically configured with multi-target-prediction (draft-mtp) and speculative decoding.
 
-### `llm-wiki.py`
-**Functional Description:** An automated knowledge compiler that synthesizes raw source files into structured Markdown pages with YAML frontmatter for an LLM Wiki.
-**Internal Workings:** It iterates through raw text, markdown, and CSV files in an input directory. By querying an OpenAI-compatible local API, it structures the raw data into cohesive wiki pages. It dynamically routes the generated files to appropriate subdirectories based on their deduced content type and maintains a central index (`RAWINDEX.md`) and log of ingested documents to avoid redundant processing.
+*   **`1-runinfra/launch9B.sh`**
+    **Functional Description:** A targeted launch script for a lighter 9B parameter orchestrator LLM.
+    **Internal Workings:** Boots `llama-server` configured for Vulkan0 and pinned to NUMA node 0, handling orchestration tasks on port 8080.
 
-### `mcp-workspace-bridge.py`
-**Functional Description:** A Model Context Protocol (MCP) server script acting as a local workspace bridge, securely exposing local project files and tools to external clients.
-**Internal Workings:** Built on `FastMCP`, it exposes read-only resources (such as Agile project state, Wiki index, and Daily Synthesis reports) and actionable tools (like document ingestion and local orchestrator querying) over standard input/output (stdio). This allows external LLM clients supporting the MCP standard to securely inspect and interact with the local workspace.
+*   **`1-runinfra/launch_nomid.sh`**
+    **Functional Description:** A script to initialize the dense text embedding node.
+    **Internal Workings:** Runs `llama-server` in embedding mode using the `nomic-embed-text` model on Vulkan0 and port 8034 to support RAG and similarity search operations.
 
-### `Atlassian-suite.py`
-**Functional Description:** A FastMCP server script acting as an ingress bridge to Atlassian tools, integrating the local agentic workflow with Jira and Confluence.
-**Internal Workings:** It authenticates with Atlassian APIs using HTTP Basic Auth. It exposes Jira active sprints as a read-only resource by fetching incomplete issues from the specified Jira project. It provides agentic tools to sync local tasks from `project_state.json` to automatically create Jira tickets, and tools to publish the `DAILY_SYNTHESIS.md` generated by `AgenticAgile.py` directly to a Confluence page.
+*   **`1-runinfra/start-zerg-swarm.sh`**
+    **Functional Description:** A bash script that orchestrates the initialization of a local 6-node LLM swarm.
+    **Internal Workings:** It launches multiple `llama-server` instances in the background, utilizing `numactl` to strictly pin each process to specific NUMA nodes. This optimizes memory affinity and PCIe bus utilization while mapping the instances to a predetermined array of local API ports for the swarm topology.
 
-### `a1111-status-visualizer.py`
-**Functional Description:** An intermediary visual output generator that creates abstract dashboard snapshots representing the project's state.
-**Internal Workings:** It takes raw analytical output from the Orchestrator or project state data and queries a local LLM to translate it into a highly descriptive Stable Diffusion visual prompt (e.g., a glowing UI if active, a red/glitchy UI if blocked). It then sends this formulated prompt to a local Automatic1111 API (`/sdapi/v1/txt2img`) to generate an image and saves the resulting base64 payload as a PNG in the wiki assets directory.
+### Core Orchestration (`2-startcore/`)
 
-### `micro-task-decomposer.py`
-**Functional Description:** A hyper-granular decomposition engine that shatters large, complex queries or tasks into microscopic, atomic, independent pieces.
-**Internal Workings:** It forces a local LLM to apply a divide-and-conquer strategy, explicitly breaking down overarching problems into isolated sub-tasks. It exports these fragmented pieces to a manifest (`atomic_manifest.json`), mapping out dependencies and inputs/outputs, allowing the orchestrator node to process them in parallel.
+*   **`2-startcore/orchestrator-node.py`**
+    **Functional Description:** A master node script that handles high-level task decomposition and parallel synthesis across multiple worker nodes.
+    **Internal Workings:** It receives complex user queries and uses an orchestrator model to break them down into independent sub-tasks. Utilizing Python's `concurrent.futures`, it dispatches these sub-tasks to multiple parallel worker node endpoints. Once all worker threads complete, it synthesizes the disjointed worker outputs into a single, cohesive, final response.
 
-### `orchestrator-node.py`
-**Functional Description:** A master node script that handles high-level task decomposition and parallel synthesis across multiple worker nodes.
-**Internal Workings:** It receives complex user queries and uses an orchestrator model to break them down into independent sub-tasks. Utilizing Python's `concurrent.futures`, it dispatches these sub-tasks to multiple parallel worker node endpoints. Once all worker threads complete, it synthesizes the disjointed worker outputs into a single, cohesive, final response.
+*   **`2-startcore/macrotask-decomposer.py`**
+    **Functional Description:** A hyper-granular decomposition engine that shatters large, complex queries or tasks into microscopic, atomic, independent pieces.
+    **Internal Workings:** It forces a local LLM to apply a divide-and-conquer strategy, explicitly breaking down overarching problems into isolated sub-tasks. It then scatters these fragmented pieces into individual markdown files within a uniquely timestamped `raw/decomposed_batch_<timestamp>` directory. This creates natively parallel targets that downstream tools or worker nodes can pick up and process independently.
 
-### `start-zerg-swarm.sh`
-**Functional Description:** A bash script that orchestrates the initialization of a local 6-node LLM swarm.
-**Internal Workings:** It launches multiple `llama-server` instances in the background, utilizing `numactl` to strictly pin each process to specific NUMA nodes. This optimizes memory affinity and PCIe bus utilization while mapping the instances to a predetermined array of local API ports for the swarm topology.
+*   **`2-startcore/generate-macrotask.py`**
+    **Functional Description:** A utility script to stream the generation of large markdown documents or raw content using a local LLM based on a direct prompt or an input file.
+    **Internal Workings:** It calls the local LLM endpoint with a system prompt optimized for expert technical writing. It streams the response to the console in real-time and ultimately saves the output as a distinct markdown file in a categorized `raw/` subdirectory with a safely generated timestamped filename.
+
+### Agile Engine (`3-agilengine/`)
+
+*   **`3-agilengine/AgenticAgile.py`**
+    **Functional Description:** An Agentic Project Orchestration pipeline that manages a "Living Wiki" by continuously ingesting raw transcripts and extracting actionable project state.
+    **Internal Workings:** It utilizes a local OpenAI-compatible API endpoint with multithreaded chunk processing (`concurrent.futures.ThreadPoolExecutor`) to parse raw logs (e.g., mock Slack logs). It extracts tasks, architectural decisions, and blockers, saving the state to `project_state.json`. It ultimately synthesizes an Automated Daily Agile Dashboard summarizing progress, risks, and velocity adjustments.
+
+*   **`3-agilengine/Atlassian-suite.py`**
+    **Functional Description:** A FastMCP server script acting as an ingress bridge to Atlassian tools, integrating the local agentic workflow with Jira and Confluence.
+    **Internal Workings:** It authenticates with Atlassian APIs using HTTP Basic Auth. It exposes Jira active sprints as a read-only resource by fetching incomplete issues from the specified Jira project. It provides agentic tools to sync local tasks from `project_state.json` to automatically create Jira tickets, and tools to publish the `DAILY_SYNTHESIS.md` generated by `AgenticAgile.py` directly to a Confluence page.
+
+### Visualization (`5-viz/`)
+
+*   **`5-viz/a1111-status-visualizer.py`**
+    **Functional Description:** An intermediary visual output generator that creates abstract dashboard snapshots representing the project's state.
+    **Internal Workings:** It takes raw analytical output from the Orchestrator or project state data and queries a local LLM to translate it into a highly descriptive Stable Diffusion visual prompt (e.g., a glowing UI if active, a red/glitchy UI if blocked). It then sends this formulated prompt to a local Automatic1111 API (`/sdapi/v1/txt2img`) to generate an image and saves the resulting base64 payload as a PNG in the wiki assets directory.
+
+### Misc Utilities (`9-misc/`)
+
+*   **`9-misc/deep-local-research.py`**
+    **Functional Description:** An autonomous local LLM web research script that conducts deep web scraping to synthesize complex technical reports. It filters out unwanted formats (e.g., video/image sites like YouTube and TikTok) and outputs a formatted PDF report using `fpdf`.
+    **Internal Workings:** It employs a multi-step analysis workflow powered by local LLM endpoints (an Orchestrator model and a Reasoning model).
+    1. **Tool Planning:** The Orchestrator plans the search strategy and invokes a deep web scraper (`perform_web_search`) utilizing DuckDuckGo (`ddgs`) with `concurrent.futures.ThreadPoolExecutor` for parallelized fetching.
+    2. **Reasoning:** A large reasoning model (e.g., qwen-3.5-35b) drafts a live response from the scraped facts using streaming inference to manage context sizes safely.
+    3. **Verification:** The Orchestrator edits and polishes the draft into a final PDF report.
+
+*   **`9-misc/git-compare-and-merge.py`**
+    **Functional Description:** An AI-Driven Git Merge Conflict Resolver that detects merge conflicts within files and delegates intelligent resolution to local AI models.
+    **Internal Workings:** It reads conflicted files, identifies git conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`), and sends the conflicting blocks to a Reasoner model to intelligently draft a resolution based on the surrounding context. It then passes the resolved file to an Orchestrator model to verify code integrity and ensure all conflict markers are fully removed before automatically writing the clean, resolved file back to disk.
+
+*   **`9-misc/local-discord-bot.py`**
+    **Functional Description:** A lightweight integration bridging a local Discord bot to a local LLM server to provide a conversational AI assistant within a Discord server.
+    **Internal Workings:** It uses the `discord.py` library to listen for direct mentions or specific commands. To ensure non-blocking interactions and keep the Discord bot responsive, it wraps requests to the local LLM server (e.g., via port 8033) in `asyncio.to_thread`. It seamlessly streams the AI's generated responses back into the Discord channel.
+
+*   **`9-misc/mcp-workspace-bridge.py`**
+    **Functional Description:** A Model Context Protocol (MCP) server script acting as a local workspace bridge, securely exposing local project files and tools to external clients.
+    **Internal Workings:** Built on `FastMCP`, it exposes read-only resources (such as Agile project state, Wiki index, and Daily Synthesis reports) and actionable tools (like document ingestion and local orchestrator querying) over standard input/output (stdio). This allows external LLM clients supporting the MCP standard to securely inspect and interact with the local workspace.
 
 ## Cohesive Swarm Workflow (Startup Sequence)
 
 To create a fully cohesive local AI ecosystem, start the scripts in the following logical sequence:
 
-1. **Infrastructure:** Execute `start-zerg-swarm.sh` to ignite the underlying LLM swarm, ensuring all local API endpoints (e.g., ports 8030-8035) are online and ready to accept requests.
-2. **Orchestration:** Launch `orchestrator-node.py` (which leverages `micro-task-decomposer.py`) to establish the master routing and task breakdown capabilities across the swarm.
-3. **Project State & Knowledge:** Run `AgenticAgile.py` and `llm-wiki.py` to ingest new context, update the agile state (`project_state.json`), and compile the structured wiki.
-4. **Integrations & Interfaces:** Start bridge services like `mcp-workspace-bridge.py` and `Atlassian-suite.py` to expose local state to external tools, and run `local-discord-bot.py` to provide a conversational interface.
-5. **On-Demand Utilities:** Use scripts like `deep-local-research.py`, `git-compare-and-merge.py`, or `a1111-status-visualizer.py` as needed for specific tasks, leveraging the established infrastructure.
+1. **Infrastructure:** Execute `1-runinfra/start-zerg-swarm.sh` to ignite the underlying LLM swarm, ensuring all local API endpoints (e.g., ports 8030-8035) are online and ready to accept requests.
+2. **Orchestration:** Launch `2-startcore/orchestrator-node.py` (which leverages `2-startcore/macrotask-decomposer.py`) to establish the master routing and task breakdown capabilities across the swarm.
+3. **Project State & Knowledge:** Run `3-agilengine/AgenticAgile.py` to ingest new context and update the agile state (`project_state.json`).
+4. **Integrations & Interfaces:** Start bridge services like `9-misc/mcp-workspace-bridge.py` and `3-agilengine/Atlassian-suite.py` to expose local state to external tools, and run `9-misc/local-discord-bot.py` to provide a conversational interface.
+5. **On-Demand Utilities:** Use scripts like `9-misc/deep-local-research.py`, `9-misc/git-compare-and-merge.py`, or `5-viz/a1111-status-visualizer.py` as needed for specific tasks, leveraging the established infrastructure.
 
 ## Architecture Visuals
 
