@@ -10,7 +10,7 @@ from openai import OpenAI
 # ==============================================================================
 
 # Orchestrator Node (Handles Decomposition & Synthesis)
-ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://192.168.2.138:8034/v1")
+ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://192.168.2.134:8080/v1")
 ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "nvidia_Orchestrator-8B-Q6_K.gguf")
 
 # Worker Nodes (Handles the parallel sub-tasks)
