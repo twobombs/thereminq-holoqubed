@@ -10,17 +10,20 @@ from openai import OpenAI
 # ==============================================================================
 
 # Orchestrator Node (Handles Decomposition & Synthesis)
-ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://127.0.0.1:8080/v1")
-ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "nemotron-orchestrator-8b")
+ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://192.168.2.138:8034/v1")
+ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "nvidia_Orchestrator-8B-Q6_K.gguf")
 
 # Worker Nodes (Handles the parallel sub-tasks)
 # In a real cluster, these might point to different IPs or ports
 WORKER_ENDPOINTS = [
-    "http://127.0.0.1:8081/v1",
-    "http://127.0.0.1:8082/v1",
-    "http://127.0.0.1:8083/v1"
+    "http://192.168.2.136:8030/v1",
+    "http://192.168.2.136:8031/v1",
+    "http://192.168.2.136:8032/v1",
+    "http://192.168.2.136:8033/v1",
+    "http://192.168.2.136:8034/v1",
+    "http://192.168.2.136:8035/v1"
 ]
-WORKER_MODEL = os.getenv("WORKER_MODEL", "qwen-coder")
+WORKER_MODEL = os.getenv("WORKER_MODEL", "Qwen3.5-9B-IQ4_XS.gguf")
 
 # Setup Orchestrator Client
 orch_client = OpenAI(base_url=ORCHESTRATOR_URL, api_key="local-sk")

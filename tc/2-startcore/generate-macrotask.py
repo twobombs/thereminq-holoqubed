@@ -17,7 +17,7 @@ client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY", "sk-local")
 )
 
-LLM_MODEL = os.getenv("LLM_MODEL", "local-model")
+LLM_MODEL = os.getenv("LLM_MODEL", "Qwen3.6-27B-IQ4_XS.gguf")
 
 SYSTEM_PROMPT = """You are an expert researcher and technical writer.
 Your task is to write a comprehensive, detailed, and highly informative document based on the user's prompt. 

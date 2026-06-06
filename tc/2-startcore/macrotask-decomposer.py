@@ -14,7 +14,7 @@ from openai import OpenAI
 
 LLM_API_BASE = os.getenv("LLM_API_BASE", "http://192.168.2.134:8033/v1")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "local-sk")
-LLM_MODEL = os.getenv("LLM_MODEL", "nemotron-orchestrator-8b")
+LLM_MODEL = os.getenv("LLM_MODEL", "nvidia_Orchestrator-8B-Q6_K.gguf")
 MAX_RETRIES = 3
 
 client = OpenAI(base_url=LLM_API_BASE, api_key=LLM_API_KEY)
