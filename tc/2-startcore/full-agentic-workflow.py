@@ -1,12 +1,3 @@
-# This is a massive upgrade to the pipeline's capabilities. If your Qwen worker nodes are running as fully agentic instances (with tools, deep reasoning/Chain of Thought, and a 128k context window), they are no longer just simple function executors—they are autonomous sub-agents.
-#To take full advantage of this, we need to alter how the orchestrator communicates with them. Instead of giving them *only* their micro-task, we should feed them the entire original query as background context so they can use that massive 128k window to see the "big picture" while they work.
-#Here are the specific changes made to the engine:
-# 1. **Big-Picture Context Injection:** The process_subtask function now accepts the original_query. The worker gets the full master prompt as background context, and its specific micro-task as its primary objective.
-# 2. **Agentic System Prompt:** The worker's system prompt has been rewritten to explicitly authorize deep reasoning, step-by-step thought processes, and the use of external tools to accomplish their goals.
-# 3. **Expanded Resource Ceilings:** Deep reasoning (like Qwen's <think> tags) and tool execution take time and consume massive amounts of tokens. I increased the worker's max_tokens from 1024 to 32768 and added a timeout of 1200 seconds (20 minutes) to prevent the network from dropping the connection while the worker is "thinking."
-# 4. **Tooling Placeholder:** Added a commented-out tools=[] parameter in the worker's API call so you can easily inject your specific JSON tool schemas (e.g., web search, python interpreter) if you are passing them dynamically via the OpenAI spec.
-#Here is the fully updated, complete script:
-#```python
 import os
 import sys
 import json
@@ -115,51 +106,57 @@ Example: ["micro piece 1", "micro piece 2", "micro piece 3"]"""
     return [large_query]
 
 # ==============================================================================
-# Phase 2: Audit Trail / File Export
+# Phase 2: Audit Trail / File Export Setup
 # ==============================================================================
 
-def export_to_split_files(pieces: list):
-    """Shatters the queue into individual markdown files for auditing."""
-    if len(pieces) <= 1:
-        return
-        
+def export_to_split_files(pieces: list) -> Path:
+    """Shatters the queue into individual markdown files. Returns the master run directory."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    batch_dir = Path(f"raw/decomposed_batch_{timestamp}")
-    batch_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = Path(f"runs/orchestrator_run_{timestamp}")
+    run_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"\n[3] 💾 QUEUE EXPORT: Saving tasks to disk for audit log...")
+    if len(pieces) <= 1:
+        return run_dir
+        
+    print(f"\n[3] 💾 QUEUE EXPORT: Saving task matrix to disk...")
+    
+    tasks_dir = run_dir / "tasks"
+    tasks_dir.mkdir(exist_ok=True)
     
     for idx, piece in enumerate(pieces, start=1):
-        filename = f"task_{idx:03d}.md"
-        filepath = batch_dir / filename
+        filepath = tasks_dir / f"task_{idx:03d}.md"
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(f"{piece.strip()}\n")
             
-    print(f"    [+] Saved {len(pieces)} files to {batch_dir.absolute()}/")
+    print(f"    [+] Saved {len(pieces)} task files to {tasks_dir.absolute()}/")
+    return run_dir
 
 # ==============================================================================
-# Phase 3: Parallel Dispatch (Agentic Qwen Workers)
+# Phase 3: Parallel Dispatch & Artifact Harvesting
 # ==============================================================================
 
-def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_query: str) -> dict:
-    """Worker thread function to execute an agentic sub-task with full context."""
+def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_query: str, run_dir: Path) -> dict:
+    """Worker thread function: executes agentic sub-task and harvests generated files."""
     print(f"    -> [Thread-{task_id:02d}] Dispatched to {endpoint} | Task: '{task_prompt[:40]}...'")
     
     worker_client = OpenAI(base_url=endpoint, api_key=WORKER_API_KEY)
     start_time = time.time()
     
-    # We now feed the worker the big-picture context, taking advantage of the 128k window
     system_instruction = (
-        "You are an autonomous, highly-capable worker agent. "
-        "You are equipped with advanced reasoning capabilities and external tools. "
-        "Think step-by-step to formulate a plan. If you need to do additional work or research, use your tools. "
-        "Provide a comprehensive, highly-detailed execution of your specific objective based on the broader context."
+        "You are an autonomous, highly-capable worker agent equipped with advanced reasoning. "
+        "Think step-by-step to formulate a plan. You must execute your specific objective fully. "
+        "CRITICAL: If your task involves writing code, creating configurations, or generating files, "
+        "you MUST output the file contents wrapped exactly in these XML tags:\n"
+        '<file path="filename.ext">\n[YOUR FILE CONTENT HERE]\n</file>\n'
+        "Do this for every file you generate so the orchestrator can extract them."
     )
     
     user_instruction = (
         f"BACKGROUND CONTEXT (The overall project):\n{original_query}\n\n"
         f"YOUR SPECIFIC OBJECTIVE:\n{task_prompt}"
     )
+    
+    saved_artifacts = []
     
     try:
         response = worker_client.chat.completions.create(
@@ -169,13 +166,34 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
                 {"role": "user", "content": user_instruction}
             ],
             temperature=0.4,
-            max_tokens=32768, # Massively increased to allow for deep reasoning/Chain of Thought output
-            timeout=1200.0,   # 20 minute timeout to allow for lengthy tool usage and long-context processing
-            # tools=[],       # Uncomment and add your JSON tool schemas here if required by your endpoint setup
+            max_tokens=32768, 
+            timeout=1200.0,   
         )
         result_text = response.choices[0].message.content.strip()
         status = "success"
         
+        # --- ARTIFACT EXTRACTION LOGIC ---
+        # Look for <file path="...">...</file> blocks in the worker's text
+        file_matches = re.finditer(r'<file\s+path="([^"]+)">([\s\S]*?)</file>', result_text, re.IGNORECASE)
+        
+        for match in file_matches:
+            file_path = match.group(1).strip()
+            file_content = match.group(2).strip()
+            
+            # Prevent malicious directory traversal (e.g., path="../../../etc/passwd")
+            safe_filename = os.path.basename(file_path)
+            
+            # Create a dedicated artifacts folder for this specific thread
+            artifact_dir = run_dir / "artifacts" / f"thread_{task_id:02d}"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            
+            full_path = artifact_dir / safe_filename
+            with open(full_path, "w", encoding="utf-8") as af:
+                af.write(file_content)
+                
+            saved_artifacts.append(safe_filename)
+            print(f"    [⬇️] [Thread-{task_id:02d}] Extracted artifact: {safe_filename}")
+
         if len(result_text) < 20:
             status = "failed_validation (output too short)"
             
@@ -184,16 +202,17 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
         status = "error"
 
     elapsed = round(time.time() - start_time, 2)
-    print(f"    <- [Thread-{task_id:02d}] Completed in {elapsed}s | Status: {status}")
+    print(f"    <- [Thread-{task_id:02d}] Completed in {elapsed}s | Artifacts: {len(saved_artifacts)} | Status: {status}")
     
     return {
         "id": task_id,
         "prompt": task_prompt,
         "result": result_text,
+        "artifacts": saved_artifacts,
         "status": status
     }
 
-def dispatch_and_gather(sub_tasks: list, original_query: str) -> list:
+def dispatch_and_gather(sub_tasks: list, original_query: str, run_dir: Path) -> list:
     """Distributes tasks across the worker pool using concurrent threads."""
     print(f"\n[4] 🚀 DISPATCH: Firing agentic tasks across Worker Pool...")
     
@@ -203,10 +222,9 @@ def dispatch_and_gather(sub_tasks: list, original_query: str) -> list:
         endpoint = WORKER_ENDPOINTS[i % len(WORKER_ENDPOINTS)]
         tasks_with_endpoints.append((i + 1, task, endpoint))
 
-    # Pass the original_query into the threads so workers have 128k context awareness
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(WORKER_ENDPOINTS)) as executor:
         future_to_task = {
-            executor.submit(process_subtask, tid, prompt, ep, original_query): tid 
+            executor.submit(process_subtask, tid, prompt, ep, original_query, run_dir): tid 
             for (tid, prompt, ep) in tasks_with_endpoints
         }
         
@@ -230,13 +248,19 @@ def synthesize_results(original_query: str, completed_tasks: list) -> str:
     
     context_blocks = []
     for t in completed_tasks:
-        context_blocks.append(f"--- Sub-Task: {t['prompt']} ---\nSTATUS: {t['status']}\nRESULT:\n{t['result']}\n")
+        artifact_note = f" (Generated Files: {', '.join(t['artifacts'])})" if t['artifacts'] else ""
+        context_blocks.append(
+            f"--- Sub-Task: {t['prompt']} ---\n"
+            f"STATUS: {t['status']}{artifact_note}\n"
+            f"RESULT:\n{t['result']}\n"
+        )
     
     consolidated_context = "\n".join(context_blocks)
     
     system_prompt = """You are the Synthesis Layer of a master AI orchestrator.
 Read the original user query and the compiled reports from multiple autonomous worker nodes.
 Merge these separate reports into a single, cohesive, highly-detailed final response.
+If the workers generated code files (artifacts), explicitly list them and explain how they connect together.
 Resolve any contradictions, remove redundancies, and directly fulfill the user's original query."""
 
     user_prompt = f"ORIGINAL QUERY: {original_query}\n\nWORKER REPORTS:\n{consolidated_context}"
@@ -249,7 +273,7 @@ Resolve any contradictions, remove redundancies, and directly fulfill the user's
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.5,
-            max_tokens=8192 # Increased to handle potentially massive worker outputs
+            max_tokens=8192 
         )
         
         final_answer = response.choices[0].message.content.strip()
@@ -296,17 +320,27 @@ if __name__ == "__main__":
     # 1. Break the massive query into atomic pieces
     fragments = decompose_to_atomic_pieces(target_query)
     
-    # 2. Write them to disk for logging/auditing
-    export_to_split_files(fragments)
+    # 2. Setup the master run directory structure
+    run_directory = export_to_split_files(fragments)
     
-    # 3. Fire them off to the Qwen worker nodes (now passing the full original query for context)
-    worker_results = dispatch_and_gather(fragments, target_query)
+    # 3. Fire tasks to Qwen workers. They will execute and pass artifacts back to the run_directory.
+    worker_results = dispatch_and_gather(fragments, target_query, run_directory)
     
     # 4. Synthesize the final result via Nemotron
     final_output = synthesize_results(target_query, worker_results)
+    
+    # 5. Export the final synthesized result to disk
+    print(f"\n[6] 💾 MASTER EXPORT: Saving final synthesis to disk...")
+    final_file_path = run_directory / "FINAL_SYNTHESIS.md"
+    try:
+        with open(final_file_path, "w", encoding="utf-8") as f:
+            f.write(final_output)
+        print(f"    [+] Successfully saved final output to: {final_file_path.absolute()}")
+    except Exception as e:
+        print(f"    [!] Failed to save final output to disk: {e}")
     
     print("\n==============================================================================")
     print("✨ FINAL SYNTHESIZED OUTPUT ✨\n")
     print(final_output)
     print("\n==============================================================================")
-
+    print(f"📂 Run Master Directory: {run_directory.absolute()}")
