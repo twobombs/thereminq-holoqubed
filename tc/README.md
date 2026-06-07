@@ -32,6 +32,10 @@ A collection of auxiliary utilities and autonomous workflows for the ThereminQ H
 
 ### Core Orchestration (`2-startcore/`)
 
+*   **`2-startcore/full-agentic-workflow.py`**
+    **Functional Description:** A Unified Local LLM Orchestrator Engine that handles hyper-granular decomposition, parallel dispatch across worker nodes, artifact harvesting, and final synthesis.
+    **Internal Workings:** It implements a multi-phase architecture: 1) Uses an Orchestrator model to break a complex query into atomic pieces. 2) Saves these pieces to disk in a timestamped run directory. 3) Utilizing Python's `concurrent.futures`, it dispatches tasks across multiple parallel worker endpoints, explicitly extracting and saving generated file artifacts. 4) Synthesizes all worker outputs and artifacts into a cohesive final document using the Orchestrator model.
+
 *   **`2-startcore/orchestrator-node.py`**
     **Functional Description:** A master node script that handles high-level task decomposition and parallel synthesis across multiple worker nodes.
     **Internal Workings:** It receives complex user queries and uses an orchestrator model to break them down into independent sub-tasks. Utilizing Python's `concurrent.futures`, it dispatches these sub-tasks to multiple parallel worker node endpoints. Once all worker threads complete, it synthesizes the disjointed worker outputs into a single, cohesive, final response.
