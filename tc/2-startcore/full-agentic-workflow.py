@@ -5,6 +5,7 @@ import time
 import re
 import argparse
 import concurrent.futures
+import queue
 from datetime import datetime
 from pathlib import Path
 from openai import OpenAI
@@ -14,22 +15,22 @@ from openai import OpenAI
 # ==============================================================================
 
 # Orchestrator Node (Handles Decomposition & Synthesis)
-ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://192.168.2.134:8080/v1")
+ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://192.168.2.137:8080/v1")
 ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "nvidia_Orchestrator-8B-Q6_K.gguf")
 ORCH_API_KEY = os.getenv("ORCH_API_KEY", "local-sk")
 MAX_RETRIES = 3
 
 # Worker Nodes (Agentic Qwen instances with 128k context, reasoning, and tools)
 WORKER_ENDPOINTS = [
-    "http://192.168.2.134:8033/v1",
     "http://192.168.2.137:8034/v1",
     "http://192.168.2.137:8035/v1"
 ]
 WORKER_MODEL = os.getenv("WORKER_MODEL", "Qwen3.5-9B-IQ4_XS.gguf")
 WORKER_API_KEY = os.getenv("WORKER_API_KEY", "local-sk")
 
-# Server Concurrency (Matches the -np flag in llama-server)
+# Server Concurrency & Resilience
 WORKER_PARALLEL_SLOTS = 2
+WORKER_RETRIES = 3
 
 # Setup Orchestrator Client
 orch_client = OpenAI(base_url=ORCHESTRATOR_URL, api_key=ORCH_API_KEY)
@@ -53,7 +54,7 @@ def extract_json_array(raw_text: str) -> str:
 
 def decompose_to_atomic_pieces(large_query: str) -> list:
     """Forces the LLM to break a large query down into atomic micro-tasks with streaming."""
-    print(f"\n[1] 📥 INGRESS: Analyzing massive query...\n    Length: {len(large_query)} characters")
+    print(f"\n[1] 📥 INGRESS: Analyzing massive query...\n    Length: {len(large_query)} characters", flush=True)
 
     system_prompt = """You are an algorithmic micro-task decomposer.
 Your sole purpose is to take a large, complex query or task and shatter it into atomic, independent pieces for parallel processing.
@@ -61,7 +62,7 @@ Output ONLY a valid, flat JSON array of strings. No markdown formatting, no conv
 Example: ["micro piece 1", "micro piece 2", "micro piece 3"]"""
 
     for attempt in range(1, MAX_RETRIES + 1):
-        print(f"[2] 🔬 DECOMPOSITION: Engaging atomic breakdown (Attempt {attempt}/{MAX_RETRIES})...")
+        print(f"[2] 🔬 DECOMPOSITION: Engaging atomic breakdown (Attempt {attempt}/{MAX_RETRIES})...", flush=True)
         raw_output = ""
         
         try:
@@ -85,7 +86,7 @@ Example: ["micro piece 1", "micro piece 2", "micro piece 3"]"""
                     text_chunk = chunk.choices[0].delta.content
                     print(text_chunk, end="", flush=True)
                     raw_output += text_chunk
-            print("\n") 
+            print("\n", flush=True) 
             
             cleaned_output = extract_json_array(raw_output)
             if not cleaned_output:
@@ -96,16 +97,16 @@ Example: ["micro piece 1", "micro piece 2", "micro piece 3"]"""
                 raise ValueError("LLM returned JSON, but it was not a flat array.")
                 
             elapsed = round(time.time() - start_time, 2)
-            print(f"    [+] Success! Shattered into {len(atomic_pieces)} distinct micro-pieces in {elapsed}s.")
+            print(f"    [+] Success! Shattered into {len(atomic_pieces)} distinct micro-pieces in {elapsed}s.", flush=True)
             return atomic_pieces
 
         except Exception as e:
-            print(f"\n    [!] Decomposition Error: {e}")
+            print(f"\n    [!] Decomposition Error: {e}", flush=True)
             if attempt < MAX_RETRIES:
-                print("    [!] Retrying...")
+                print("    [!] Retrying...", flush=True)
                 time.sleep(2)
 
-    print("    [!] Fatal: Exhausted all retries. Falling back to single-task execution.")
+    print("    [!] Fatal: Exhausted all retries. Falling back to single-task execution.", flush=True)
     return [large_query]
 
 # ==============================================================================
@@ -121,7 +122,7 @@ def export_to_split_files(pieces: list) -> Path:
     if len(pieces) <= 1:
         return run_dir
         
-    print(f"\n[3] 💾 QUEUE EXPORT: Saving task matrix to disk...")
+    print(f"\n[3] 💾 QUEUE EXPORT: Saving task matrix to disk...", flush=True)
     
     tasks_dir = run_dir / "tasks"
     tasks_dir.mkdir(exist_ok=True)
@@ -131,7 +132,7 @@ def export_to_split_files(pieces: list) -> Path:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(f"{piece.strip()}\n")
             
-    print(f"    [+] Saved {len(pieces)} task files to {tasks_dir.absolute()}/")
+    print(f"    [+] Saved {len(pieces)} task files to {tasks_dir.absolute()}/", flush=True)
     return run_dir
 
 # ==============================================================================
@@ -140,7 +141,7 @@ def export_to_split_files(pieces: list) -> Path:
 
 def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_query: str, run_dir: Path) -> dict:
     """Worker thread function: executes agentic sub-task and harvests generated files."""
-    print(f"    -> [Thread-{task_id:02d}] Dispatched to {endpoint} | Task: '{task_prompt[:40]}...'")
+    print(f"    -> [Thread-{task_id:02d}] Dispatched to {endpoint} | Task: '{task_prompt[:40]}...' ", flush=True)
     
     worker_client = OpenAI(base_url=endpoint, api_key=WORKER_API_KEY)
     start_time = time.time()
@@ -221,24 +222,66 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
     }
 
 def dispatch_and_gather(sub_tasks: list, original_query: str, run_dir: Path) -> list:
-    """Distributes tasks across the worker pool and calculates running metrics."""
+    """Distributes tasks across a dynamic pool of worker endpoints with auto-retries."""
     max_concurrent = len(WORKER_ENDPOINTS) * WORKER_PARALLEL_SLOTS
-    print(f"\n[4] 🚀 DISPATCH: Firing up to {max_concurrent} simultaneous tasks across Worker Pool...")
+    print(f"\n[4] 🚀 DISPATCH: Firing up to {max_concurrent} simultaneous tasks using Dynamic Load Balancing...", flush=True)
     
-    results = []
-    tasks_with_endpoints = []
-    for i, task in enumerate(sub_tasks):
-        endpoint = WORKER_ENDPOINTS[i % len(WORKER_ENDPOINTS)]
-        tasks_with_endpoints.append((i + 1, task, endpoint))
+    # 1. Initialize the dynamic endpoint pool
+    endpoint_queue = queue.Queue()
+    for ep in WORKER_ENDPOINTS:
+        for _ in range(WORKER_PARALLEL_SLOTS):
+            endpoint_queue.put(ep)
 
+    # 2. Wrapper function to manage checkout/check-in of endpoints and retries
+    def dynamic_worker(tid: int, prompt: str):
+        last_result = None
+        for attempt in range(1, WORKER_RETRIES + 1):
+            # This will block if all endpoint slots are currently checked out
+            endpoint = endpoint_queue.get()
+            
+            try:
+                if attempt > 1:
+                    print(f"    [↻] [Thread-{tid:02d}] Retrying (Attempt {attempt}/{WORKER_RETRIES}) on {endpoint}...", flush=True)
+                    
+                result = process_subtask(tid, prompt, endpoint, original_query, run_dir)
+                
+                # If successful, immediately return the good result
+                if result["status"] == "success":
+                    return result
+                    
+                # Otherwise, log the failure and prepare for next attempt
+                last_result = result
+                print(f"    [!] [Thread-{tid:02d}] Task failed on {endpoint} | Status: {result['status']}", flush=True)
+                
+            except Exception as e:
+                print(f"    [!] [Thread-{tid:02d}] Hard crash on {endpoint}: {e}", flush=True)
+                last_result = {
+                    "id": tid, "prompt": prompt, "result": f"Hard crash: {str(e)}", 
+                    "artifacts": [], "status": "error", "completion_tokens": 0, 
+                    "total_tokens": 0, "elapsed": 0, "tps": 0
+                }
+            finally:
+                # Crucial: Always return the endpoint slot to the queue
+                endpoint_queue.put(endpoint)
+                
+            # Brief cool-down before pulling a new endpoint from the queue for the retry
+            if attempt < WORKER_RETRIES:
+                time.sleep(2)
+                
+        # If we exit the loop, all retries failed
+        print(f"    [❌] [Thread-{tid:02d}] Exhausted all {WORKER_RETRIES} retries. Marking task as failed.", flush=True)
+        return last_result
+
+    results = []
     aggregate_total_tokens = 0
     aggregate_completion_tokens = 0
     aggregate_time = 0.0
 
+    # 3. Fire tasks into the executor
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
         future_to_task = {
-            executor.submit(process_subtask, tid, prompt, ep, original_query, run_dir): tid 
-            for (tid, prompt, ep) in tasks_with_endpoints
+            executor.submit(dynamic_worker, i + 1, task): i + 1 
+            for i, task in enumerate(sub_tasks)
         }
         
         for future in concurrent.futures.as_completed(future_to_task):
@@ -251,17 +294,16 @@ def dispatch_and_gather(sub_tasks: list, original_query: str, run_dir: Path) -> 
                 aggregate_completion_tokens += task_result["completion_tokens"]
                 aggregate_time += task_result["elapsed"]
                 
-                # Calculate running aggregate TPS (Total Gen Tokens / Total Time Spent)
                 agg_tps = round(aggregate_completion_tokens / aggregate_time, 2) if aggregate_time > 0 else 0
                 
-                print(f"    <- [Thread-{task_result['id']:02d}] Finished | "
+                print(f"    <- [Thread-{task_result['id']:02d}] Finished in {task_result['elapsed']}s | "
                       f"Status: {task_result['status']} | "
                       f"Task TPS: {task_result['tps']} | "
                       f"Agg TPS: {agg_tps} | "
-                      f"Total Tokens: {aggregate_total_tokens:,}")
+                      f"Total Tokens: {aggregate_total_tokens:,}", flush=True)
                       
             except Exception as exc:
-                print(f"    [!] Thread generated an exception: {exc}")
+                print(f"    [!] Thread generated an exception: {exc}", flush=True)
 
     results.sort(key=lambda x: x["id"])
     return results
@@ -272,7 +314,7 @@ def dispatch_and_gather(sub_tasks: list, original_query: str, run_dir: Path) -> 
 
 def synthesize_results(original_query: str, completed_tasks: list) -> str:
     """Takes all worker outputs and synthesizes the final comprehensive answer."""
-    print(f"\n[5] 🧠 SYNTHESIS: Consolidating worker progress into final output...")
+    print(f"\n[5] 🧠 SYNTHESIS: Consolidating worker progress into final output...", flush=True)
     
     context_blocks = []
     for t in completed_tasks:
@@ -305,11 +347,11 @@ Resolve any contradictions, remove redundancies, and directly fulfill the user's
         )
         
         final_answer = response.choices[0].message.content.strip()
-        print("    [+] Synthesis complete.")
+        print("    [+] Synthesis complete.", flush=True)
         return final_answer
         
     except Exception as e:
-        print(f"    [!] Error during synthesis: {e}")
+        print(f"    [!] Error during synthesis: {e}", flush=True)
         return f"Synthesis Phase Failed. Orchestrator Error: {str(e)}"
 
 # ==============================================================================
@@ -325,16 +367,16 @@ if __name__ == "__main__":
     
     if args.file:
         if not os.path.exists(args.file):
-            print(f"[!] Fatal Error: The file '{args.file}' does not exist.")
+            print(f"[!] Fatal Error: The file '{args.file}' does not exist.", flush=True)
             sys.exit(1)
         with open(args.file, "r", encoding="utf-8") as f:
             target_query = f.read()
-        print(f"[*] Loaded query from file: {args.file}")
+        print(f"[*] Loaded query from file: {args.file}", flush=True)
     elif args.prompt:
         target_query = args.prompt
-        print("[*] Loaded query from command line argument.")
+        print("[*] Loaded query from command line argument.", flush=True)
     else:
-        print("[*] No input arguments provided. Using default complex query.")
+        print("[*] No input arguments provided. Using default complex query.", flush=True)
         target_query = """
         Build a complete, secure, production-ready React and Node.js e-commerce application. 
         It needs a PostgreSQL database, user authentication via JWT, a product catalog with 
@@ -343,24 +385,24 @@ if __name__ == "__main__":
         and deployment scripts using Docker and AWS ECS.
         """
         
-    print("\n=== STARTING UNIFIED ORCHESTRATOR ENGINE ===")
+    print("\n=== STARTING UNIFIED ORCHESTRATOR ENGINE ===", flush=True)
     
     fragments = decompose_to_atomic_pieces(target_query)
     run_directory = export_to_split_files(fragments)
     worker_results = dispatch_and_gather(fragments, target_query, run_directory)
     final_output = synthesize_results(target_query, worker_results)
     
-    print(f"\n[6] 💾 MASTER EXPORT: Saving final synthesis to disk...")
+    print(f"\n[6] 💾 MASTER EXPORT: Saving final synthesis to disk...", flush=True)
     final_file_path = run_directory / "FINAL_SYNTHESIS.md"
     try:
         with open(final_file_path, "w", encoding="utf-8") as f:
             f.write(final_output)
-        print(f"    [+] Successfully saved final output to: {final_file_path.absolute()}")
+        print(f"    [+] Successfully saved final output to: {final_file_path.absolute()}", flush=True)
     except Exception as e:
-        print(f"    [!] Failed to save final output to disk: {e}")
+        print(f"    [!] Failed to save final output to disk: {e}", flush=True)
     
-    print("\n==============================================================================")
-    print("✨ FINAL SYNTHESIZED OUTPUT ✨\n")
-    print(final_output)
-    print("\n==============================================================================")
-    print(f"📂 Run Master Directory: {run_directory.absolute()}")
+    print("\n==============================================================================", flush=True)
+    print("✨ FINAL SYNTHESIZED OUTPUT ✨\n", flush=True)
+    print(final_output, flush=True)
+    print("\n==============================================================================", flush=True)
+    print(f"📂 Run Master Directory: {run_directory.absolute()}", flush=True)
