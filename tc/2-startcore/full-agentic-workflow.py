@@ -21,18 +21,21 @@ MAX_RETRIES = 3
 
 # Worker Nodes (Agentic Qwen instances with 128k context, reasoning, and tools)
 WORKER_ENDPOINTS = [
-    "http://192.168.2.136:8030/v1",
-    "http://192.168.2.136:8031/v1",
-    "http://192.168.2.136:8032/v1",
-    "http://192.168.2.136:8033/v1",
-    "http://192.168.2.136:8034/v1",
-    "http://192.168.2.136:8035/v1"
+    "http://192.168.2.134:8033/v1",
+    "http://192.168.2.137:8034/v1",
+    "http://192.168.2.137:8035/v1"
 ]
 WORKER_MODEL = os.getenv("WORKER_MODEL", "Qwen3.5-9B-IQ4_XS.gguf")
 WORKER_API_KEY = os.getenv("WORKER_API_KEY", "local-sk")
 
+# Server Concurrency (Matches the -np flag in llama-server)
+WORKER_PARALLEL_SLOTS = 2
+
 # Setup Orchestrator Client
 orch_client = OpenAI(base_url=ORCHESTRATOR_URL, api_key=ORCH_API_KEY)
+
+# Base directory for runs
+BASE_DIR = Path(__file__).parent
 
 # ==============================================================================
 # Phase 1: Hyper-Granular Decomposition
@@ -43,7 +46,8 @@ def extract_json_array(raw_text: str) -> str:
     cleaned_text = re.sub(r'```json\s*', '', raw_text, flags=re.IGNORECASE)
     cleaned_text = re.sub(r'```\s*', '', cleaned_text)
     
-    match = re.search(r'\[.*\]', cleaned_text, re.DOTALL)
+    # Non-greedy match to prevent capturing trailing text
+    match = re.search(r'\[.*?\]', cleaned_text, re.DOTALL)
     if match:
         return match.group(0)
     return ""
@@ -112,7 +116,7 @@ Example: ["micro piece 1", "micro piece 2", "micro piece 3"]"""
 def export_to_split_files(pieces: list) -> Path:
     """Shatters the queue into individual markdown files. Returns the master run directory."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path(f"runs/orchestrator_run_{timestamp}")
+    run_dir = BASE_DIR / f"runs/orchestrator_run_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
     
     if len(pieces) <= 1:
@@ -214,7 +218,8 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
 
 def dispatch_and_gather(sub_tasks: list, original_query: str, run_dir: Path) -> list:
     """Distributes tasks across the worker pool using concurrent threads."""
-    print(f"\n[4] 🚀 DISPATCH: Firing agentic tasks across Worker Pool...")
+    max_concurrent = len(WORKER_ENDPOINTS) * WORKER_PARALLEL_SLOTS
+    print(f"\n[4] 🚀 DISPATCH: Firing up to {max_concurrent} simultaneous agentic tasks across Worker Pool...")
     
     results = []
     tasks_with_endpoints = []
@@ -222,7 +227,7 @@ def dispatch_and_gather(sub_tasks: list, original_query: str, run_dir: Path) -> 
         endpoint = WORKER_ENDPOINTS[i % len(WORKER_ENDPOINTS)]
         tasks_with_endpoints.append((i + 1, task, endpoint))
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(WORKER_ENDPOINTS)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
         future_to_task = {
             executor.submit(process_subtask, tid, prompt, ep, original_query, run_dir): tid 
             for (tid, prompt, ep) in tasks_with_endpoints
@@ -326,7 +331,7 @@ if __name__ == "__main__":
     # 3. Fire tasks to Qwen workers. They will execute and pass artifacts back to the run_directory.
     worker_results = dispatch_and_gather(fragments, target_query, run_directory)
     
-    # 4. Synthesize the final result via Nemotron
+    # 4. Synthesize the final result
     final_output = synthesize_results(target_query, worker_results)
     
     # 5. Export the final synthesized result to disk
