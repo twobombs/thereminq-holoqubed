@@ -26,23 +26,23 @@ A collection of auxiliary utilities and autonomous workflows for the ThereminQ H
     **Functional Description:** A script to initialize the dense text embedding node.
     **Internal Workings:** Runs `llama-server` in embedding mode using the `nomic-embed-text` model on Vulkan0 and port 8034 to support RAG and similarity search operations.
 
+*   **`1-runinfra/start-orchestrator.sh`**
+    **Functional Description:** A bash script that launches the orchestrator node.
+    **Internal Workings:** Executes `llama-server` configured with specific parameters for the Orchestrator model to handle complex queries efficiently.
+
 *   **`1-runinfra/start-zerg-swarm.sh`**
     **Functional Description:** A bash script that orchestrates the initialization of a local 6-node LLM swarm.
     **Internal Workings:** It launches multiple `llama-server` instances in the background, utilizing `numactl` to strictly pin each process to specific NUMA nodes. This optimizes memory affinity and PCIe bus utilization while mapping the instances to a predetermined array of local API ports for the swarm topology.
 
 ### Core Orchestration (`2-startcore/`)
 
+*   **`2-startcore/distill-marcotask.py`**
+    **Functional Description:** A script that uses an LLM to distill actionable tasks from dense or fluffy technical documents.
+    **Internal Workings:** Reads a specified text document and sends its content to an orchestrator-level LLM with a system prompt instructing it to extract only a clean, actionable markdown list of to-dos and requirements. It saves this distilled list alongside the original file.
+
 *   **`2-startcore/full-agentic-workflow.py`**
     **Functional Description:** A Unified Local LLM Orchestrator Engine that handles hyper-granular decomposition, parallel dispatch across worker nodes, artifact harvesting, and final synthesis.
     **Internal Workings:** It implements a multi-phase architecture: 1) Uses an Orchestrator model to break a complex query into atomic pieces. 2) Saves these pieces to disk in a timestamped run directory. 3) Utilizing Python's `concurrent.futures`, it dispatches tasks across multiple parallel worker endpoints, explicitly extracting and saving generated file artifacts. 4) Synthesizes all worker outputs and artifacts into a cohesive final document using the Orchestrator model.
-
-*   **`2-startcore/orchestrator-node.py`**
-    **Functional Description:** A master node script that handles high-level task decomposition and parallel synthesis across multiple worker nodes.
-    **Internal Workings:** It receives complex user queries and uses an orchestrator model to break them down into independent sub-tasks. Utilizing Python's `concurrent.futures`, it dispatches these sub-tasks to multiple parallel worker node endpoints. Once all worker threads complete, it synthesizes the disjointed worker outputs into a single, cohesive, final response.
-
-*   **`2-startcore/macrotask-decomposer.py`**
-    **Functional Description:** A hyper-granular decomposition engine that shatters large, complex queries or tasks into microscopic, atomic, independent pieces.
-    **Internal Workings:** It forces a local LLM to apply a divide-and-conquer strategy, explicitly breaking down overarching problems into isolated sub-tasks. It then scatters these fragmented pieces into individual markdown files within a uniquely timestamped `raw/decomposed_batch_<timestamp>` directory. This creates natively parallel targets that downstream tools or worker nodes can pick up and process independently.
 
 *   **`2-startcore/generate-macrotask.py`**
     **Functional Description:** A utility script to stream the generation of large markdown documents or raw content using a local LLM based on a direct prompt or an input file.
@@ -90,7 +90,7 @@ A collection of auxiliary utilities and autonomous workflows for the ThereminQ H
 To create a fully cohesive local AI ecosystem, start the scripts in the following logical sequence:
 
 1. **Infrastructure:** Execute `1-runinfra/start-zerg-swarm.sh` to ignite the underlying LLM swarm, ensuring all local API endpoints (e.g., ports 8030-8035) are online and ready to accept requests.
-2. **Orchestration:** Launch `2-startcore/orchestrator-node.py` (which leverages `2-startcore/macrotask-decomposer.py`) to establish the master routing and task breakdown capabilities across the swarm.
+2. **Orchestration:** Launch `2-startcore/full-agentic-workflow.py` to establish the master routing and task breakdown capabilities across the swarm.
 3. **Project State & Knowledge:** Run `3-agilengine/AgenticAgile.py` to ingest new context and update the agile state (`project_state.json`).
 4. **Integrations & Interfaces:** Start bridge services like `9-misc/mcp-workspace-bridge.py` and `3-agilengine/Atlassian-suite.py` to expose local state to external tools, and run `9-misc/local-discord-bot.py` to provide a conversational interface.
 5. **On-Demand Utilities:** Use scripts like `9-misc/deep-local-research.py`, `9-misc/git-compare-and-merge.py`, or `5-viz/a1111-status-visualizer.py` as needed for specific tasks, leveraging the established infrastructure.

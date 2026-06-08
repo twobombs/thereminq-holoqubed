@@ -129,7 +129,8 @@ def chunk_text(text, chunk_size=6, overlap=1):
     while i < len(lines):
         chunks.append('\n'.join(lines[i:i + chunk_size]))
         i += (chunk_size - overlap)
-        if i >= len(lines): break
+        if i >= len(lines):
+            break
     return chunks
 
 def dispatch_jobs_in_chunks(large_text, prompt_template, system_prompt=""):
@@ -257,7 +258,7 @@ def generate_daily_synthesis():
 # ==============================================================================
 
 if __name__ == "__main__":
-    print(f"=== STARTING DEEP-SCAN AGENTIC CONTROL LOOP ===")
+    print("=== STARTING DEEP-SCAN AGENTIC CONTROL LOOP ===")
     print(f"[*] Target Raw Directory: {RAW_DIR.absolute()}")
     
     processed_files = load_processed_index()
