@@ -36,7 +36,7 @@ A collection of auxiliary utilities and autonomous workflows for the ThereminQ H
 
 ### Core Orchestration (`2-startcore/`)
 
-*   **`2-startcore/distill-marcotask.py`**
+*   **`2-startcore/distill-macrotask.py`**
     **Functional Description:** A script that uses an LLM to distill actionable tasks from dense or fluffy technical documents.
     **Internal Workings:** Reads a specified text document and sends its content to an orchestrator-level LLM with a system prompt instructing it to extract only a clean, actionable markdown list of to-dos and requirements. It saves this distilled list alongside the original file.
 
