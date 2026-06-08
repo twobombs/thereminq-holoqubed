@@ -46,7 +46,6 @@ def extract_json_array(raw_text: str) -> str:
     cleaned_text = re.sub(r'```json\s*', '', raw_text, flags=re.IGNORECASE)
     cleaned_text = re.sub(r'```\s*', '', cleaned_text)
     
-    # Non-greedy match to prevent capturing trailing text
     match = re.search(r'\[.*?\]', cleaned_text, re.DOTALL)
     if match:
         return match.group(0)
@@ -161,6 +160,9 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
     )
     
     saved_artifacts = []
+    comp_tokens = 0
+    tot_tokens = 0
+    status = "success"
     
     try:
         response = worker_client.chat.completions.create(
@@ -174,20 +176,19 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
             timeout=1200.0,   
         )
         result_text = response.choices[0].message.content.strip()
-        status = "success"
+        
+        # Token Tracking
+        if response.usage:
+            comp_tokens = response.usage.completion_tokens
+            tot_tokens = response.usage.total_tokens
         
         # --- ARTIFACT EXTRACTION LOGIC ---
-        # Look for <file path="...">...</file> blocks in the worker's text
         file_matches = re.finditer(r'<file\s+path="([^"]+)">([\s\S]*?)</file>', result_text, re.IGNORECASE)
-        
         for match in file_matches:
             file_path = match.group(1).strip()
             file_content = match.group(2).strip()
             
-            # Prevent malicious directory traversal (e.g., path="../../../etc/passwd")
             safe_filename = os.path.basename(file_path)
-            
-            # Create a dedicated artifacts folder for this specific thread
             artifact_dir = run_dir / "artifacts" / f"thread_{task_id:02d}"
             artifact_dir.mkdir(parents=True, exist_ok=True)
             
@@ -196,7 +197,6 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
                 af.write(file_content)
                 
             saved_artifacts.append(safe_filename)
-            print(f"    [⬇️] [Thread-{task_id:02d}] Extracted artifact: {safe_filename}")
 
         if len(result_text) < 20:
             status = "failed_validation (output too short)"
@@ -206,26 +206,34 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
         status = "error"
 
     elapsed = round(time.time() - start_time, 2)
-    print(f"    <- [Thread-{task_id:02d}] Completed in {elapsed}s | Artifacts: {len(saved_artifacts)} | Status: {status}")
+    task_tps = round(comp_tokens / elapsed, 2) if elapsed > 0 else 0
     
     return {
         "id": task_id,
         "prompt": task_prompt,
         "result": result_text,
         "artifacts": saved_artifacts,
-        "status": status
+        "status": status,
+        "completion_tokens": comp_tokens,
+        "total_tokens": tot_tokens,
+        "elapsed": elapsed,
+        "tps": task_tps
     }
 
 def dispatch_and_gather(sub_tasks: list, original_query: str, run_dir: Path) -> list:
-    """Distributes tasks across the worker pool using concurrent threads."""
+    """Distributes tasks across the worker pool and calculates running metrics."""
     max_concurrent = len(WORKER_ENDPOINTS) * WORKER_PARALLEL_SLOTS
-    print(f"\n[4] 🚀 DISPATCH: Firing up to {max_concurrent} simultaneous agentic tasks across Worker Pool...")
+    print(f"\n[4] 🚀 DISPATCH: Firing up to {max_concurrent} simultaneous tasks across Worker Pool...")
     
     results = []
     tasks_with_endpoints = []
     for i, task in enumerate(sub_tasks):
         endpoint = WORKER_ENDPOINTS[i % len(WORKER_ENDPOINTS)]
         tasks_with_endpoints.append((i + 1, task, endpoint))
+
+    aggregate_total_tokens = 0
+    aggregate_completion_tokens = 0
+    aggregate_time = 0.0
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
         future_to_task = {
@@ -237,6 +245,21 @@ def dispatch_and_gather(sub_tasks: list, original_query: str, run_dir: Path) -> 
             try:
                 task_result = future.result()
                 results.append(task_result)
+                
+                # Metric Aggregation
+                aggregate_total_tokens += task_result["total_tokens"]
+                aggregate_completion_tokens += task_result["completion_tokens"]
+                aggregate_time += task_result["elapsed"]
+                
+                # Calculate running aggregate TPS (Total Gen Tokens / Total Time Spent)
+                agg_tps = round(aggregate_completion_tokens / aggregate_time, 2) if aggregate_time > 0 else 0
+                
+                print(f"    <- [Thread-{task_result['id']:02d}] Finished | "
+                      f"Status: {task_result['status']} | "
+                      f"Task TPS: {task_result['tps']} | "
+                      f"Agg TPS: {agg_tps} | "
+                      f"Total Tokens: {aggregate_total_tokens:,}")
+                      
             except Exception as exc:
                 print(f"    [!] Thread generated an exception: {exc}")
 
@@ -322,19 +345,11 @@ if __name__ == "__main__":
         
     print("\n=== STARTING UNIFIED ORCHESTRATOR ENGINE ===")
     
-    # 1. Break the massive query into atomic pieces
     fragments = decompose_to_atomic_pieces(target_query)
-    
-    # 2. Setup the master run directory structure
     run_directory = export_to_split_files(fragments)
-    
-    # 3. Fire tasks to Qwen workers. They will execute and pass artifacts back to the run_directory.
     worker_results = dispatch_and_gather(fragments, target_query, run_directory)
-    
-    # 4. Synthesize the final result
     final_output = synthesize_results(target_query, worker_results)
     
-    # 5. Export the final synthesized result to disk
     print(f"\n[6] 💾 MASTER EXPORT: Saving final synthesis to disk...")
     final_file_path = run_directory / "FINAL_SYNTHESIS.md"
     try:
