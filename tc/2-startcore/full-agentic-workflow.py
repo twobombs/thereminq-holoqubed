@@ -74,9 +74,9 @@ Example: ["micro piece 1", "micro piece 2", "micro piece 3"]"""
                     {"role": "user", "content": f"Decompose this to the atomic level:\n\n{large_query}"}
                 ],
                 temperature=0.7, 
-                max_tokens=4096,
+                max_tokens=40960,
                 stream=True,
-                timeout=300.0
+                timeout=600.0
             )
             
             print("    [~] Streaming Live Generation:\n    >> ", end="", flush=True)
@@ -173,7 +173,7 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
                 {"role": "user", "content": user_instruction}
             ],
             temperature=0.4,
-            max_tokens=32768, 
+            max_tokens=65536, 
             timeout=1200.0,   
         )
         result_text = response.choices[0].message.content.strip()
@@ -343,7 +343,7 @@ Resolve any contradictions, remove redundancies, and directly fulfill the user's
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.5,
-            max_tokens=8192 
+            max_tokens=40960 
         )
         
         final_answer = response.choices[0].message.content.strip()
