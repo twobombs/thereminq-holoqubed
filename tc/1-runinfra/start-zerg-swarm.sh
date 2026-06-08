@@ -39,7 +39,7 @@ for node_config in "${SWARM[@]}"; do
   # Launch the server in the background (&)
   numactl --cpunodebind=${NUMA_NODE} --membind=${NUMA_NODE} ./build/bin/llama-server \
     -m $MODEL \
-    -c 131072 \
+    -c 196608 \
     -np 2 \
     -ngl 999 \
     --device Vulkan${VULKAN_ID} \
