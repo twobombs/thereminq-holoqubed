@@ -40,7 +40,7 @@ for node_config in "${SWARM[@]}"; do
   numactl --cpunodebind=${NUMA_NODE} --membind=${NUMA_NODE} ./build/bin/llama-server \
     -m $MODEL \
     -c 131072 \
-    -np 1 \
+    -np 2 \
     -ngl 999 \
     --device Vulkan${VULKAN_ID} \
     --kv-unified \
