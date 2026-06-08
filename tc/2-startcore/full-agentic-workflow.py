@@ -122,7 +122,7 @@ def export_to_split_files(pieces: list) -> Path:
     if len(pieces) <= 1:
         return run_dir
         
-    print(f"\n[3] 💾 QUEUE EXPORT: Saving task matrix to disk...", flush=True)
+    print("\n[3] 💾 QUEUE EXPORT: Saving task matrix to disk...", flush=True)
     
     tasks_dir = run_dir / "tasks"
     tasks_dir.mkdir(exist_ok=True)
@@ -314,7 +314,7 @@ def dispatch_and_gather(sub_tasks: list, original_query: str, run_dir: Path) -> 
 
 def synthesize_results(original_query: str, completed_tasks: list) -> str:
     """Takes all worker outputs and synthesizes the final comprehensive answer."""
-    print(f"\n[5] 🧠 SYNTHESIS: Consolidating worker progress into final output...", flush=True)
+    print("\n[5] 🧠 SYNTHESIS: Consolidating worker progress into final output...", flush=True)
     
     context_blocks = []
     for t in completed_tasks:
@@ -392,7 +392,7 @@ if __name__ == "__main__":
     worker_results = dispatch_and_gather(fragments, target_query, run_directory)
     final_output = synthesize_results(target_query, worker_results)
     
-    print(f"\n[6] 💾 MASTER EXPORT: Saving final synthesis to disk...", flush=True)
+    print("\n[6] 💾 MASTER EXPORT: Saving final synthesis to disk...", flush=True)
     final_file_path = run_directory / "FINAL_SYNTHESIS.md"
     try:
         with open(final_file_path, "w", encoding="utf-8") as f:

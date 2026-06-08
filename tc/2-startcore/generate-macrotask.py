@@ -50,7 +50,7 @@ def generate_safe_filename(prompt_text: str) -> str:
 def generate_content(prompt: str, target_dir: Path):
     """Streams the LLM generation to the console and saves the final output."""
     print(f"\n[1] 🧠 Generating content for: '{prompt[:50]}...'")
-    print(f"[2] 📡 Streaming response from local LLM...\n")
+    print("[2] 📡 Streaming response from local LLM...\n")
     print("-" * 60)
     
     full_content = ""

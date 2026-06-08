@@ -210,7 +210,7 @@ def perform_ai_merge(target_branch, source_branch, merge_in_progress=False):
             print("❌ Your working directory is not clean. Please commit or stash your changes first.")
             sys.exit(1)
 
-        print(f"🔄 Setting up branches...")
+        print("🔄 Setting up branches...")
         run_git_command(["checkout", target_branch])
         print(f"🌿 Creating isolated branch: {merge_branch_name}")
         run_git_command(["checkout", "-b", merge_branch_name])
