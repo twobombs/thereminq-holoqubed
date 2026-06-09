@@ -13,6 +13,10 @@ DISTILLER_URL = os.getenv("DISTILLER_URL", "http://192.168.2.137:8080/v1")
 DISTILLER_MODEL = os.getenv("DISTILLER_MODEL", "nvidia_Orchestrator-8B-Q6_K.gguf")
 DISTILLER_API_KEY = os.getenv("DISTILLER_API_KEY", "local-sk")
 
+# Safety threshold: Warn if input exceeds typical 8k token context (~30,000 chars)
+# Adjust this based on your specific model's context window.
+WARN_CHAR_LIMIT = 30000 
+
 client = OpenAI(base_url=DISTILLER_URL, api_key=DISTILLER_API_KEY)
 
 # ==============================================================================
@@ -20,19 +24,32 @@ client = OpenAI(base_url=DISTILLER_URL, api_key=DISTILLER_API_KEY)
 # ==============================================================================
 
 def read_file_content(file_path: Path) -> str:
-    """Reads the content of the target document."""
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception as e:
-        print(f"[!] Error reading file '{file_path}': {e}", flush=True)
-        sys.exit(1)
+    """Reads the content of the target document with fallback encodings."""
+    encodings = ['utf-8', 'latin-1', 'windows-1252']
+    for enc in encodings:
+        try:
+            with open(file_path, "r", encoding=enc) as f:
+                return f.read()
+        except UnicodeDecodeError:
+            continue
+        except Exception as e:
+            print(f"[!] Error reading file '{file_path}': {e}", flush=True)
+            sys.exit(1)
+            
+    print(f"[!] Fatal: Could not decode '{file_path}' using standard encodings.", flush=True)
+    sys.exit(1)
 
 def distill_document(raw_text: str) -> str:
     """
     Forces the LLM to ruthlessly extract actionable to-dos from fluffy text.
     """
-    print(f"[*] Ingesting document ({len(raw_text)} characters)...", flush=True)
+    char_count = len(raw_text)
+    print(f"[*] Ingesting document ({char_count:,} characters)...", flush=True)
+    
+    if char_count > WARN_CHAR_LIMIT:
+        print(f"    [!] WARNING: Document size exceeds {WARN_CHAR_LIMIT:,} characters.", flush=True)
+        print("    [!] The LLM may truncate context or hallucinate. Consider chunking the input.", flush=True)
+
     print("[*] Distilling into actionable tasks...", flush=True)
 
     system_prompt = (
