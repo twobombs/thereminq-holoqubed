@@ -75,7 +75,7 @@ launch_node() {
     export MESA_SHADER_CACHE_DIR="$CACHE_DIR"
 
     while true; do
-        echo "[+] Booting Instance -> Vulkan${VULKAN_ID} | NUMA Node ${NUMA_NODE} | Port ${PORT}"
+        echo "[+] Booting Instance -> Physical Vulkan${VULKAN_ID} | NUMA Node ${NUMA_NODE} | Port ${PORT}"
 
         # Using >> to append to the log file so crash data isn't overwritten on restart
         numactl --cpunodebind="${NUMA_NODE}" --membind="${NUMA_NODE}" "$SERVER_BIN" \
@@ -83,7 +83,7 @@ launch_node() {
             -c 131072 \
             -np 2 \
             -ngl 999 \
-            --device "Vulkan${VULKAN_ID}" \
+            -mg "${VULKAN_ID}" \
             --kv-unified \
             -fa on \
             --split-mode none \
@@ -91,7 +91,7 @@ launch_node() {
             --cache-type-v q4_0 \
             -t 6 \
             -tb 6 \
-            -u 256 \
+            -b 256 \
             -ub 256 \
             --no-mmap \
             --spec-type draft-mtp \
