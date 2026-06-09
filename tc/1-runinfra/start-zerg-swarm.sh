@@ -3,15 +3,16 @@
 # ==============================================================================
 # ThereminQ-HPC Agentic Swarm Orchestrator
 # 6x Qwen 3.6 9B MTP | 100% VRAM-Resident Pipeline
-# Strict NUMA-to-PCIe Affinity Mapping
+# Strict NUMA-to-PCIe Affinity | Auto-Restart | Shader Cache Isolation
 # ==============================================================================
 
-# Model Configuration
+# Configuration
 MODEL="/media/aryan/nvme/models/Qwen3.5-9B-IQ4_XS.gguf"
+SERVER_BIN="/media/aryan/nvme/llama.cpp/build/bin/llama-server"
 LOG_DIR="./agent_logs"
 
 # Ensure the log directory exists
-mkdir -p $LOG_DIR
+mkdir -p "$LOG_DIR"
 
 # Define the Swarm Topology: "Vulkan_ID  NUMA_Node  API_Port"
 # Mapped directly from the physical sysfs PCIe tree
@@ -24,47 +25,112 @@ SWARM=(
   "5 6 8035"
 )
 
-# Graceful Shutdown: Catch Ctrl+C and kill all background servers
-trap 'echo -e "\n[ThereminQ] Shutting down all agentic nodes..."; kill $(jobs -p); exit' SIGINT SIGTERM
+# Graceful Shutdown Sequence
+shutdown_swarm() {
+    # Unbind traps to prevent recursive triggering during teardown
+    trap - SIGINT SIGTERM EXIT 
+    echo -e "\n[ThereminQ] Shutting down all agentic nodes..."
+    
+    # Kill the background restart loops
+    kill $(jobs -p) 2>/dev/null
+    
+    # Explicitly kill surviving llama-server processes to guarantee VRAM release
+    pkill -f "$SERVER_BIN" 2>/dev/null
+    
+    wait 2>/dev/null
+    echo "[ThereminQ] Swarm offline."
+    exit 0
+}
 
-echo "[ThereminQ] Initiating 6-Node Agentic Swarm..."
+# Catch Ctrl+C/Termination and trigger the shutdown sequence
+trap shutdown_swarm SIGINT SIGTERM EXIT
 
-# Loop through the topology array and ignite each instance
+# Prerequisite Checks
+if [ ! -f "$MODEL" ]; then
+    echo "[!] Error: Model file not found at $MODEL"
+    exit 1
+fi
+
+if [ ! -x "$SERVER_BIN" ]; then
+    echo "[!] Error: llama-server executable not found or not executable at $SERVER_BIN"
+    exit 1
+fi
+
+if ! command -v numactl &> /dev/null; then
+    echo "[!] Error: numactl is not installed. Please install it to continue."
+    exit 1
+fi
+
+echo "[ThereminQ] Initiating 6-Node Agentic Swarm with Auto-Restart..."
+
+# Auto-Restart Wrapper Function
+launch_node() {
+    local VULKAN_ID=$1
+    local NUMA_NODE=$2
+    local PORT=$3
+    local LOG_FILE=$4
+    local CACHE_DIR=$5
+
+    # Isolate the RADV Shader Cache for this specific Vulkan device thread
+    export MESA_SHADER_CACHE_DIR="$CACHE_DIR"
+
+    while true; do
+        echo "[+] Booting Instance -> Vulkan${VULKAN_ID} | NUMA Node ${NUMA_NODE} | Port ${PORT}"
+
+        # Using >> to append to the log file so crash data isn't overwritten on restart
+        numactl --cpunodebind="${NUMA_NODE}" --membind="${NUMA_NODE}" "$SERVER_BIN" \
+            -m "$MODEL" \
+            -c 131072 \
+            -np 2 \
+            -ngl 999 \
+            --device "Vulkan${VULKAN_ID}" \
+            --kv-unified \
+            -fa on \
+            --split-mode none \
+            --cache-type-k q8_0 \
+            --cache-type-v q4_0 \
+            -t 6 \
+            -tb 6 \
+            -u 256 \
+            -ub 256 \
+            --no-mmap \
+            --spec-type draft-mtp \
+            --spec-draft-n-max 3 \
+            --chat-template-kwargs '{"preserve_thinking": true}' \
+            --host 0.0.0.0 \
+            --port "${PORT}" \
+            --tools all \
+            --fit off >> "$LOG_FILE" 2>&1
+        
+        # If execution reaches this line, the server process has stopped
+        echo "[!] Warning: Vulkan${VULKAN_ID} on Port ${PORT} stopped unexpectedly. Restarting in 5 seconds..."
+        echo -e "\n[$(date)] -> Process stopped unexpectedly. Restarting in 5 seconds...\n" >> "$LOG_FILE"
+        sleep 5
+    done
+}
+
+# Loop through the topology array and ignite each instance using the wrapper
 for node_config in "${SWARM[@]}"; do
-  # Read the variables from the current array string
-  read -r VULKAN_ID NUMA_NODE PORT <<< "$node_config"
-
-  echo "[+] Booting Instance -> Vulkan${VULKAN_ID} | NUMA Node ${NUMA_NODE} | Port ${PORT}"
-
-  # Launch the server in the background (&)
-  numactl --cpunodebind=${NUMA_NODE} --membind=${NUMA_NODE} ./build/bin/llama-server \
-    -m $MODEL \
-    -c 196608 \
-    -np 2 \
-    -ngl 999 \
-    --device Vulkan${VULKAN_ID} \
-    --kv-unified \
-    -fa on \
-    --split-mode none \
-    --cache-type-k q8_0 \
-    --cache-type-v q4_0 \
-    -t 6 \
-    -tb 6 \
-    --no-mmap \
-    --spec-type draft-mtp \
-    --spec-draft-n-max 3 \
-    --chat-template-kwargs '{"preserve_thinking": true}' \
-    --host 0.0.0.0 \
-    --port ${PORT} \
-    --tools all \
-    --fit off > "${LOG_DIR}/vulkan${VULKAN_ID}_port${PORT}.log" 2>&1 &
+    read -r VULKAN_ID NUMA_NODE PORT <<< "$node_config"
+    LOG_TARGET="${LOG_DIR}/vulkan${VULKAN_ID}_port${PORT}.log"
+    CACHE_TARGET="${LOG_DIR}/shader_cache_vk${VULKAN_ID}"
+    
+    # Create the isolated cache directory
+    mkdir -p "$CACHE_TARGET"
+    
+    # Launch the auto-restart wrapper function in the background
+    launch_node "$VULKAN_ID" "$NUMA_NODE" "$PORT" "$LOG_TARGET" "$CACHE_TARGET" &
+    
+    # Stagger the boot sequence by 8 seconds to prevent PCIe DMA saturation
+    echo "[ThereminQ] Pausing 8 seconds to allow Vulkan graph initialization for node ${VULKAN_ID}..."
+    sleep 8
 done
 
 echo "=============================================================================="
-echo "[ThereminQ] Swarm is online."
-echo "[ThereminQ] View individual initialization logs in: $LOG_DIR"
+echo "[ThereminQ] Swarm boot sequence active."
+echo "[ThereminQ] View individual initialization and crash logs in: $LOG_DIR"
 echo "[ThereminQ] Press [Ctrl+C] to gracefully terminate all instances."
 echo "=============================================================================="
 
-# Keep the script alive to hold the background jobs
+# Keep the script alive to hold the background loops
 wait
