@@ -53,10 +53,9 @@ def generate_safe_filename(prompt_text: str) -> str:
     return f"{timestamp}_{slug}.md"
 
 def generate_content(prompt: str, target_dir: Path):
-    """Streams the LLM generation to the console and saves the final output."""
+    """Generates content from the local LLM silently and saves the final output to a file."""
     print(f"\n[1] 🧠 Generating content for: '{prompt[:50]}...'")
-    print("[2] 📡 Streaming response from local LLM...\n")
-    print("-" * 60)
+    print("[2] 📡 Requesting response from local LLM (CLI output disabled)...")
     
     full_content = ""
     start_time = time.time()
@@ -76,13 +75,11 @@ def generate_content(prompt: str, target_dir: Path):
         for chunk in response:
             if chunk.choices[0].delta.content is not None:
                 text_chunk = chunk.choices[0].delta.content
-                print(text_chunk, end="", flush=True)
+                # Appending to string variable without printing to the console
                 full_content += text_chunk
                 
-        print("\n" + "-" * 60)
-        
         elapsed = round(time.time() - start_time, 2)
-        print(f"\n[+] Generation complete in {elapsed} seconds.")
+        print(f"[+] Generation complete in {elapsed} seconds.")
         
         # Save to file
         filename = generate_safe_filename(prompt)
