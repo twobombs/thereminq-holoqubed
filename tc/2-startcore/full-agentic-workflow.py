@@ -105,7 +105,6 @@ Output ONLY a valid, flat JSON array of strings. No markdown formatting, no conv
                 
             atomic_pieces = json.loads(cleaned_output)
             
-            # Apply Fallback if stream stripped usage
             if prompt_tokens == 0 and comp_tokens == 0:
                 prompt_tokens = estimate_tokens(system_prompt + large_query)
                 comp_tokens = estimate_tokens(raw_output)
@@ -147,7 +146,7 @@ def export_to_split_files(pieces: list) -> Path:
     return run_dir
 
 # ==============================================================================
-# Phase 3: Parallel Dispatch & Artifact Harvesting
+# Phase 3 & 4: Pipelined Dispatch & Map-Reduce 
 # ==============================================================================
 
 def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_query: str, run_dir: Path) -> dict:
@@ -215,62 +214,6 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
         "total_tokens": tot_tokens, "elapsed": elapsed, "tps": task_tps
     }
 
-def dispatch_and_gather(sub_tasks: list, original_query: str, run_dir: Path) -> list:
-    max_concurrent = len(WORKER_ENDPOINTS) * WORKER_PARALLEL_SLOTS
-    print(f"\n[4] 🚀 DISPATCH: Firing up to {max_concurrent} simultaneous tasks using Dynamic Load Balancing...", flush=True)
-    
-    endpoint_queue = queue.Queue()
-    for ep in WORKER_ENDPOINTS:
-        for _ in range(WORKER_PARALLEL_SLOTS): endpoint_queue.put(ep)
-
-    def dynamic_worker(tid: int, prompt: str):
-        last_result = None
-        for attempt in range(1, WORKER_RETRIES + 1):
-            endpoint = endpoint_queue.get()
-            try:
-                result = process_subtask(tid, prompt, endpoint, original_query, run_dir)
-                if result["status"] == "success": return result
-                last_result = result
-            except Exception as e:
-                last_result = {"id": tid, "status": "error", "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "elapsed": 0, "tps": 0}
-            finally:
-                endpoint_queue.put(endpoint)
-            time.sleep(2)
-        return last_result
-
-    results = []
-    aggregate_total_tokens = 0
-    aggregate_completion_tokens = 0
-    
-    # strictly tracks true parallel duration
-    dispatch_start_time = time.time()
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
-        future_to_task = {executor.submit(dynamic_worker, i + 1, task): i + 1 for i, task in enumerate(sub_tasks)}
-        
-        for future in concurrent.futures.as_completed(future_to_task):
-            task_result = future.result()
-            results.append(task_result)
-            
-            aggregate_total_tokens += task_result["total_tokens"]
-            aggregate_completion_tokens += task_result["completion_tokens"]
-            
-            current_elapsed = time.time() - dispatch_start_time
-            agg_tps = round(aggregate_completion_tokens / current_elapsed, 2) if current_elapsed > 0 else 0
-            
-            print(f"    <- [Thread-{task_result['id']:02d}] Finished in {task_result['elapsed']}s | "
-                  f"Status: {task_result['status']} | "
-                  f"Task TPS: {task_result['tps']} | "
-                  f"Agg TPS: {agg_tps} | "
-                  f"Total Tokens: {aggregate_total_tokens:,}", flush=True)
-
-    results.sort(key=lambda x: x["id"])
-    return results
-
-# ==============================================================================
-# Phase 4: Parallel Map-Reduce & Deduplication Cluster
-# ==============================================================================
-
 def process_map_reduce_batch(batch_idx: int, batch: list, endpoint: str, original_query: str) -> tuple:
     client = OpenAI(base_url=endpoint, api_key=ORCH_API_KEY)
     
@@ -289,7 +232,7 @@ def process_map_reduce_batch(batch_idx: int, batch: list, endpoint: str, origina
             temperature=0.3, max_tokens=16384
         )
         elapsed = round(time.time() - start_time, 2)
-        print(f"    [+] Batch {batch_idx} compressed via {endpoint} in {elapsed}s.", flush=True)
+        print(f"    [+] Map-Reduce Batch {batch_idx} compressed via {endpoint} in {elapsed}s.", flush=True)
         
         res_content = response.choices[0].message.content.strip()
         if response.usage and response.usage.prompt_tokens > 0:
@@ -301,41 +244,115 @@ def process_map_reduce_batch(batch_idx: int, batch: list, endpoint: str, origina
         print(f"    [!] Error during Map-Reduce on batch {batch_idx}: {e}", flush=True)
         return f"Batch {batch_idx} Failed.", 0, 0
 
-def map_reduce_deduplication(completed_tasks: list, original_query: str) -> tuple:
-    print(f"\n[5] 🗜️ MAP-REDUCE: Activating orchestrator pool to compress {len(completed_tasks)} tasks...", flush=True)
-    batches = [completed_tasks[i:i + MAP_REDUCE_BATCH_SIZE] for i in range(0, len(completed_tasks), MAP_REDUCE_BATCH_SIZE)]
+def execute_pipelined_workers_and_reducers(sub_tasks: list, original_query: str, run_dir: Path) -> tuple:
+    max_worker_concurrent = len(WORKER_ENDPOINTS) * WORKER_PARALLEL_SLOTS
+    max_orch_concurrent = len(ORCHESTRATOR_ENDPOINTS) * ORCH_PARALLEL_SLOTS
     
+    print(f"\n[4] 🚀 PIPELINE DISPATCH: Launching up to {max_worker_concurrent} parallel workers and streaming to {max_orch_concurrent} Map-Reduce reducers...", flush=True)
+    print(f"    [i] Diagnostics: {len(sub_tasks)} tasks generated for {max_worker_concurrent} worker slots. Queueing handled automatically.", flush=True)
+
+    worker_queue = queue.Queue()
+    for ep in WORKER_ENDPOINTS:
+        for _ in range(WORKER_PARALLEL_SLOTS): worker_queue.put(ep)
+
     orch_queue = queue.Queue()
     for ep in ORCHESTRATOR_ENDPOINTS:
         for _ in range(ORCH_PARALLEL_SLOTS): orch_queue.put(ep)
-            
-    max_orch_concurrency = len(ORCHESTRATOR_ENDPOINTS) * ORCH_PARALLEL_SLOTS
-    condensed_reports = [None] * len(batches)
-    total_prompt_tokens = 0
-    total_comp_tokens = 0
 
-    def worker_wrapper(idx, batch):
+    def worker_wrapper(tid: int, prompt: str):
+        last_result = None
+        for _ in range(WORKER_RETRIES):
+            endpoint = worker_queue.get()
+            try:
+                result = process_subtask(tid, prompt, endpoint, original_query, run_dir)
+                if result["status"] == "success": return result
+                last_result = result
+            except Exception:
+                last_result = {"id": tid, "status": "error", "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "elapsed": 0, "tps": 0}
+            finally:
+                worker_queue.put(endpoint)
+            time.sleep(2)
+        return last_result
+
+    def orch_wrapper(batch_idx: int, batch: list):
         endpoint = orch_queue.get()
         try:
-            return idx, *process_map_reduce_batch(idx, batch, endpoint, original_query)
-        finally: orch_queue.put(endpoint)
+            return batch_idx, *process_map_reduce_batch(batch_idx, batch, endpoint, original_query)
+        finally:
+            orch_queue.put(endpoint)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_orch_concurrency) as executor:
-        futures = {executor.submit(worker_wrapper, i + 1, b): i for i, b in enumerate(batches)}
-        for future in concurrent.futures.as_completed(futures):
-            batch_id, result_text, p_tok, c_tok = future.result()
-            condensed_reports[batch_id - 1] = result_text
-            total_prompt_tokens += p_tok
-            total_comp_tokens += c_tok
+    results_dict = {}
+    condensed_reports = []
+    
+    worker_p_tok, worker_c_tok = 0, 0
+    reduce_p_tok, reduce_c_tok = 0, 0
+    
+    dispatch_start_time = time.time()
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_worker_concurrent) as worker_exec, \
+         concurrent.futures.ThreadPoolExecutor(max_workers=max_orch_concurrent) as orch_exec:
+        
+        # Submit all worker tasks
+        future_to_task = {worker_exec.submit(worker_wrapper, i + 1, task): i + 1 for i, task in enumerate(sub_tasks)}
+        
+        next_needed_task_id = 1
+        current_batch = []
+        batch_idx = 1
+        map_reduce_futures = []
+        
+        # Monitor worker completions
+        for future in concurrent.futures.as_completed(future_to_task):
+            task_result = future.result()
+            tid = task_result["id"]
+            results_dict[tid] = task_result
+            
+            worker_p_tok += task_result["prompt_tokens"]
+            worker_c_tok += task_result["completion_tokens"]
+            
+            current_elapsed = time.time() - dispatch_start_time
+            agg_tps = round(worker_c_tok / current_elapsed, 2) if current_elapsed > 0 else 0
+            
+            print(f"    <- [Worker-{tid:02d}] Finished in {task_result['elapsed']}s | "
+                  f"Status: {task_result['status']} | "
+                  f"Agg TPS: {agg_tps}", flush=True)
 
-    return [r for r in condensed_reports if r is not None], total_prompt_tokens, total_comp_tokens
+            # Sequentially process into batches to preserve chronological context for Map-Reduce
+            while next_needed_task_id in results_dict:
+                current_batch.append(results_dict.pop(next_needed_task_id))
+                next_needed_task_id += 1
+                
+                if len(current_batch) == MAP_REDUCE_BATCH_SIZE:
+                    print(f"    [>] Pipeline trigger: Routing continuous sequential batch {batch_idx} to Reducer", flush=True)
+                    mr_future = orch_exec.submit(orch_wrapper, batch_idx, current_batch.copy())
+                    map_reduce_futures.append(mr_future)
+                    current_batch = []
+                    batch_idx += 1
+                    
+        # Flush any remaining tasks to a final Map-Reduce operation
+        if current_batch:
+            print(f"    [>] Pipeline trigger: Routing final sequence batch {batch_idx} to Reducer", flush=True)
+            mr_future = orch_exec.submit(orch_wrapper, batch_idx, current_batch)
+            map_reduce_futures.append(mr_future)
+            
+        # Collect outcomes from the orchestrator reductions
+        for future in concurrent.futures.as_completed(map_reduce_futures):
+            b_id, res_content, p_tok, c_tok = future.result()
+            condensed_reports.append((b_id, res_content))
+            reduce_p_tok += p_tok
+            reduce_c_tok += c_tok
+            
+    # Re-order the reduced reports before synthesis
+    condensed_reports.sort(key=lambda x: x[0])
+    final_condensed = [r[1] for r in condensed_reports]
+    
+    return final_condensed, worker_p_tok, worker_c_tok, reduce_p_tok, reduce_c_tok
 
 # ==============================================================================
 # Phase 5: Synthesis
 # ==============================================================================
 
 def synthesize_results(original_query: str, condensed_reports: list) -> tuple:
-    print("\n[6] 🧠 SYNTHESIS: Consolidating reduced reports into final output...", flush=True)
+    print("\n[5] 🧠 SYNTHESIS: Consolidating reduced reports into final output...", flush=True)
     consolidated_context = "\n".join([f"--- CONDENSED BATCH {i+1} ---\n{report}\n" for i, report in enumerate(condensed_reports)])
     
     system_prompt = "You are the Synthesis Layer. Merge these briefs into a cohesive final response."
@@ -391,16 +408,11 @@ if __name__ == "__main__":
     # 2. File Setup
     run_directory = export_to_split_files(fragments)
     
-    # 3. Threaded Worker Dispatch
-    worker_results = dispatch_and_gather(fragments, target_query, run_directory)
-    for res in worker_results:
-        global_input_tokens += res.get("prompt_tokens", 0)
-        global_output_tokens += res.get("completion_tokens", 0)
+    # 3 & 4. Pipelined Worker Dispatch & Map-Reduce Deduplication
+    condensed_results, w_p, w_c, r_p, r_c = execute_pipelined_workers_and_reducers(fragments, target_query, run_directory)
     
-    # 4. Clustered/Parallel Map-Reduce Pass
-    condensed_results, p_tok, c_tok = map_reduce_deduplication(worker_results, target_query)
-    global_input_tokens += p_tok
-    global_output_tokens += c_tok
+    global_input_tokens += (w_p + r_p)
+    global_output_tokens += (w_c + r_c)
     
     # 5. Final Synthesis
     final_output, p_tok, c_tok = synthesize_results(target_query, condensed_results)
@@ -409,7 +421,7 @@ if __name__ == "__main__":
     
     master_elapsed_time = time.time() - master_start_time
     
-    print("\n[7] 💾 MASTER EXPORT: Saving final synthesis to disk...", flush=True)
+    print("\n[6] 💾 MASTER EXPORT: Saving final synthesis to disk...", flush=True)
     final_file_path = run_directory / "FINAL_SYNTHESIS.md"
     with open(final_file_path, "w", encoding="utf-8") as f:
         f.write(final_output)
@@ -423,3 +435,4 @@ if __name__ == "__main__":
     print(f"    [+] Synthesis Payload Size: {len(final_output):,} characters", flush=True)
     print(f"    📂 Run Master Directory:    {run_directory.absolute()}", flush=True)
     print("==============================================================================", flush=True)
+    
