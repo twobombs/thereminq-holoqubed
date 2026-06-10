@@ -112,9 +112,5 @@ if __name__ == "__main__":
     actionable_tasks = distill_document(raw_content)
     saved_path = save_distilled_output(actionable_tasks, input_path)
     
-    print("\n==============================================================================", flush=True)
-    print("✨ DISTILLED TO-DO LIST ✨\n", flush=True)
-    print(actionable_tasks, flush=True)
-    print("\n==============================================================================", flush=True)
-    print(f"[+] Distilled file saved to: {saved_path}", flush=True)
-    print(f"[*] Suggested next step: python3 full-agentic-workflow.py -f {saved_path}", flush=True)
+    print(f"\n[+] Distillation complete. File saved to: {saved_path}", flush=True)
+    print(f"[*] Suggested next step: python full-agentic-workflow.py -f {saved_path}", flush=True)
