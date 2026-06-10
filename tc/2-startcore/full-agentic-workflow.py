@@ -244,25 +244,23 @@ def rolling_synthesis_step(step_idx: int, total_steps: int, current_synthesis: s
             "Do not throw away previous work. Expand, refine, and seamlessly integrate the new data."
         )
         
-    try:
-        start_time = time.time()
-        response = client.chat.completions.create(
-            model=ORCHESTRATOR_MODEL,
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-            temperature=0.3, max_tokens=40960
-        )
-        elapsed = round(time.time() - start_time, 2)
-        print(f"    [+] Synthesis of Step {step_idx}/{total_steps} via {endpoint} completed in {elapsed}s.", flush=True)
-        
-        res_content = response.choices[0].message.content.strip()
-        if response.usage and response.usage.prompt_tokens > 0:
-            return res_content, response.usage.prompt_tokens, response.usage.completion_tokens
-        else:
-            return res_content, estimate_tokens(system_prompt + user_prompt), estimate_tokens(res_content)
-            
-    except Exception as e:
-        print(f"    [!] Error during rolling synthesis on step {step_idx}: {e}", flush=True)
-        return "", 0, 0
+    start_time = time.time()
+    response = client.chat.completions.create(
+        model=ORCHESTRATOR_MODEL,
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+        temperature=0.3, max_tokens=40960
+    )
+    elapsed = round(time.time() - start_time, 2)
+    print(f"    [+] Synthesis of Step {step_idx}/{total_steps} via {endpoint} completed in {elapsed}s.", flush=True)
+    
+    res_content = response.choices[0].message.content.strip()
+    if not res_content:
+        raise ValueError("Received empty response from the synthesis layer.")
+
+    if response.usage and response.usage.prompt_tokens > 0:
+        return res_content, response.usage.prompt_tokens, response.usage.completion_tokens
+    else:
+        return res_content, estimate_tokens(system_prompt + user_prompt), estimate_tokens(res_content)
 
 def execute_rolling_pipeline(sub_tasks: list, original_query: str, run_dir: Path) -> tuple:
     max_worker_concurrent = len(WORKER_ENDPOINTS) * WORKER_PARALLEL_SLOTS
@@ -280,36 +278,49 @@ def execute_rolling_pipeline(sub_tasks: list, original_query: str, run_dir: Path
 
     synthesis_queue = queue.Queue()
     
-    # State tracking variables modified by threads
     master_synthesis_document = ""
     orch_p_tok, orch_c_tok = 0, 0
     total_tasks = len(sub_tasks)
 
-    # Dedicated thread for processing continuous synthesis
+    # Dedicated thread for processing continuous synthesis with retries and fallback
     def synthesis_consumer():
         nonlocal master_synthesis_document, orch_p_tok, orch_c_tok
         while True:
             target_task = synthesis_queue.get()
-            if target_task is None:  # Sentinel value to exit
+            if target_task is None: 
                 synthesis_queue.task_done()
                 break
                 
-            orch_endpoint = orch_queue.get()
-            try:
-                print(f"    [>] Pipeline trigger: Routing Step {target_task['id']}/{total_tasks} into Master Document...", flush=True)
-                new_synth, p_tok, c_tok = rolling_synthesis_step(
-                    target_task['id'], total_tasks, master_synthesis_document, 
-                    target_task, orch_endpoint, original_query
-                )
-                
-                if new_synth:  
-                    master_synthesis_document = new_synth
+            success = False
+            for attempt in range(1, MAX_RETRIES + 1):
+                orch_endpoint = orch_queue.get()
+                try:
+                    print(f"    [>] Pipeline trigger: Routing Step {target_task['id']}/{total_tasks} into Master Document (Attempt {attempt}/{MAX_RETRIES})...", flush=True)
+                    new_synth, p_tok, c_tok = rolling_synthesis_step(
+                        target_task['id'], total_tasks, master_synthesis_document, 
+                        target_task, orch_endpoint, original_query
+                    )
                     
-                orch_p_tok += p_tok
-                orch_c_tok += c_tok
-            finally:
-                orch_queue.put(orch_endpoint)
-                synthesis_queue.task_done()
+                    if new_synth:  
+                        master_synthesis_document = new_synth
+                        orch_p_tok += p_tok
+                        orch_c_tok += c_tok
+                        success = True
+                        break 
+                except Exception as e:
+                    print(f"    [!] Error during rolling synthesis on step {target_task['id']}: {e}", flush=True)
+                finally:
+                    orch_queue.put(orch_endpoint)
+                
+                time.sleep(2)
+
+            # Hard fallback to prevent silent data drop
+            if not success:
+                print(f"    [!] CRITICAL: Failed to synthesize Step {target_task['id']} after {MAX_RETRIES} attempts. Appending raw worker data as fallback.", flush=True)
+                fallback_text = f"\n\n--- [WARNING: RAW UNPROCESSED STEP {target_task['id']}] ---\nTask: {target_task['prompt']}\nResult:\n{target_task['result']}\n"
+                master_synthesis_document += fallback_text
+
+            synthesis_queue.task_done()
 
     def worker_wrapper(tid: int, prompt: str):
         last_result = None
@@ -341,7 +352,6 @@ def execute_rolling_pipeline(sub_tasks: list, original_query: str, run_dir: Path
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_worker_concurrent) as worker_exec:
         future_to_task = {worker_exec.submit(worker_wrapper, i + 1, task): i + 1 for i, task in enumerate(sub_tasks)}
         
-        # Main thread simply monitors workers and feeds the synthesis queue seamlessly
         for future in concurrent.futures.as_completed(future_to_task):
             task_result = future.result()
             tid = task_result["id"]
@@ -357,15 +367,11 @@ def execute_rolling_pipeline(sub_tasks: list, original_query: str, run_dir: Path
                   f"Status: {task_result['status']} | "
                   f"Agg Worker TPS: {agg_tps}", flush=True)
 
-            # Route ready, sequential results immediately to the async queue
             while next_needed_task_id in results_dict:
                 synthesis_queue.put(results_dict.pop(next_needed_task_id))
                 next_needed_task_id += 1
                 
-    # All workers finished. Push sentinel to cleanly shutdown synthesis queue.
     synthesis_queue.put(None)
-    
-    # Wait for the background synthesis thread to catch up and finalize
     synthesis_queue.join()
     synth_thread.join()
                 
