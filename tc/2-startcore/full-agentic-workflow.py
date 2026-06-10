@@ -14,16 +14,14 @@ from openai import OpenAI
 # Configuration & Endpoints
 # ==============================================================================
 
-# Distributed Orchestrator Cluster (Handles Decomposition, Map-Reduce, & Synthesis)
 ORCHESTRATOR_ENDPOINTS = [
     "http://192.168.2.137:8080/v1",
-    "http://192.168.2.137:8081/v1"  # Expanded for horizontal scale
+    "http://192.168.2.137:8080/v1"
 ]
 ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "nvidia_Orchestrator-8B-Q6_K.gguf")
 ORCH_API_KEY = os.getenv("ORCH_API_KEY", "local-sk")
 MAX_RETRIES = 3
 
-# Worker Nodes (Agentic Qwen instances with 128k context, reasoning, and tools)
 WORKER_ENDPOINTS = [
     "http://192.168.2.137:8034/v1",
     "http://192.168.2.137:8035/v1"
@@ -31,33 +29,32 @@ WORKER_ENDPOINTS = [
 WORKER_MODEL = os.getenv("WORKER_MODEL", "Qwen3.5-9B-IQ4_XS.gguf")
 WORKER_API_KEY = os.getenv("WORKER_API_KEY", "local-sk")
 
-# Server Concurrency & Resilience
 WORKER_PARALLEL_SLOTS = 2
 WORKER_RETRIES = 3
-ORCH_PARALLEL_SLOTS = 2  # Concurrency headroom per orchestrator node
+ORCH_PARALLEL_SLOTS = 2
 
-# Map-Reduce Settings
 MAP_REDUCE_BATCH_SIZE = 3
-
-# Base directory for runs
 BASE_DIR = Path(__file__).parent
+
+# ==============================================================================
+# Helper: Fallback Token Estimator
+# ==============================================================================
+
+def estimate_tokens(text: str) -> int:
+    """Fallback token calculation if local endpoints drop the usage object."""
+    return len(str(text)) // 4
 
 # ==============================================================================
 # Phase 1: Hyper-Granular Decomposition
 # ==============================================================================
 
 def extract_json_array(raw_text: str) -> str:
-    """Uses regex to extract the first JSON array from a messy string."""
     cleaned_text = re.sub(r'```json\s*', '', raw_text, flags=re.IGNORECASE)
     cleaned_text = re.sub(r'```\s*', '', cleaned_text)
-    
     match = re.search(r'\[.*?\]', cleaned_text, re.DOTALL)
-    if match:
-        return match.group(0)
-    return ""
+    return match.group(0) if match else ""
 
 def decompose_to_atomic_pieces(large_query: str) -> tuple:
-    """Forces the LLM cluster to break a large query down into atomic micro-tasks."""
     print(f"\n[1] 📥 INGRESS: Analyzing massive query...\n    Length: {len(large_query)} characters", flush=True)
 
     system_prompt = """You are an algorithmic micro-task decomposer.
@@ -84,7 +81,7 @@ Output ONLY a valid, flat JSON array of strings. No markdown formatting, no conv
                 temperature=0.7, 
                 max_tokens=40960,
                 stream=True,
-                stream_options={"include_usage": True}, # Request usage metrics in the final streaming chunk
+                stream_options={"include_usage": True},
                 timeout=600.0
             )
             
@@ -96,7 +93,6 @@ Output ONLY a valid, flat JSON array of strings. No markdown formatting, no conv
                     print(text_chunk, end="", flush=True)
                     raw_output += text_chunk
                 
-                # Extract usage if the backend sends it in the terminal chunk
                 if hasattr(chunk, 'usage') and chunk.usage is not None:
                     prompt_tokens = chunk.usage.prompt_tokens
                     comp_tokens = chunk.usage.completion_tokens
@@ -108,8 +104,11 @@ Output ONLY a valid, flat JSON array of strings. No markdown formatting, no conv
                 raise ValueError("Could not locate a JSON array in the LLM response.")
                 
             atomic_pieces = json.loads(cleaned_output)
-            if not isinstance(atomic_pieces, list):
-                raise ValueError("LLM returned JSON, but it was not a flat array.")
+            
+            # Apply Fallback if stream stripped usage
+            if prompt_tokens == 0 and comp_tokens == 0:
+                prompt_tokens = estimate_tokens(system_prompt + large_query)
+                comp_tokens = estimate_tokens(raw_output)
                 
             elapsed = round(time.time() - start_time, 2)
             print(f"    [+] Success! Shattered into {len(atomic_pieces)} distinct micro-pieces in {elapsed}s.", flush=True)
@@ -120,27 +119,22 @@ Output ONLY a valid, flat JSON array of strings. No markdown formatting, no conv
             if attempt < MAX_RETRIES:
                 target_orch = ORCHESTRATOR_ENDPOINTS[attempt % len(ORCHESTRATOR_ENDPOINTS)]
                 client = OpenAI(base_url=target_orch, api_key=ORCH_API_KEY)
-                print(f"    [!] Retrying and shifting context to node: {target_orch}", flush=True)
                 time.sleep(2)
 
-    print("    [!] Fatal: Exhausted all retries. Falling back to single-task execution.", flush=True)
-    return [large_query], 0, 0
+    return [large_query], estimate_tokens(large_query), 10
 
 # ==============================================================================
 # Phase 2: Audit Trail / File Export Setup
 # ==============================================================================
 
 def export_to_split_files(pieces: list) -> Path:
-    """Shatters the queue into individual markdown files. Returns the master run directory."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = BASE_DIR / f"runs/orchestrator_run_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
     
-    if len(pieces) <= 1:
-        return run_dir
+    if len(pieces) <= 1: return run_dir
         
     print("\n[3] 💾 QUEUE EXPORT: Saving task matrix to disk...", flush=True)
-    
     tasks_dir = run_dir / "tasks"
     tasks_dir.mkdir(exist_ok=True)
     
@@ -157,7 +151,6 @@ def export_to_split_files(pieces: list) -> Path:
 # ==============================================================================
 
 def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_query: str, run_dir: Path) -> dict:
-    """Worker thread function: executes agentic sub-task and harvests generated files."""
     print(f"    -> [Thread-{task_id:02d}] Dispatched to {endpoint} | Task: '{task_prompt[:40]}...' ", flush=True)
     
     worker_client = OpenAI(base_url=endpoint, api_key=WORKER_API_KEY)
@@ -169,18 +162,10 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
         "CRITICAL: If your task involves writing code, creating configurations, or generating files, "
         "you MUST output the file contents wrapped exactly in these XML tags:\n"
         '<file path="filename.ext">\n[YOUR FILE CONTENT HERE]\n</file>\n'
-        "Do this for every file you generate so the orchestrator can extract them."
     )
-    
-    user_instruction = (
-        f"BACKGROUND CONTEXT (The overall project):\n{original_query}\n\n"
-        f"YOUR SPECIFIC OBJECTIVE:\n{task_prompt}"
-    )
+    user_instruction = f"BACKGROUND CONTEXT:\n{original_query}\n\nYOUR SPECIFIC OBJECTIVE:\n{task_prompt}"
     
     saved_artifacts = []
-    prompt_tokens = 0
-    comp_tokens = 0
-    tot_tokens = 0
     status = "success"
     
     try:
@@ -190,128 +175,94 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": user_instruction}
             ],
-            temperature=0.4,
-            max_tokens=65536, 
-            timeout=1200.0,   
+            temperature=0.4, max_tokens=65536, timeout=1200.0,   
         )
         result_text = response.choices[0].message.content.strip()
         
-        if response.usage:
+        if response.usage and response.usage.prompt_tokens > 0:
             prompt_tokens = response.usage.prompt_tokens
             comp_tokens = response.usage.completion_tokens
-            tot_tokens = response.usage.total_tokens
+        else:
+            prompt_tokens = estimate_tokens(system_instruction + user_instruction)
+            comp_tokens = estimate_tokens(result_text)
+            
+        tot_tokens = prompt_tokens + comp_tokens
         
         file_matches = re.finditer(r'<file\s+path="([^"]+)">([\s\S]*?)</file>', result_text, re.IGNORECASE)
         for match in file_matches:
-            file_path = match.group(1).strip()
-            file_content = match.group(2).strip()
-            
+            file_path, file_content = match.group(1).strip(), match.group(2).strip()
             safe_filename = os.path.basename(file_path)
             artifact_dir = run_dir / "artifacts" / f"thread_{task_id:02d}"
             artifact_dir.mkdir(parents=True, exist_ok=True)
             
-            full_path = artifact_dir / safe_filename
-            with open(full_path, "w", encoding="utf-8") as af:
+            with open(artifact_dir / safe_filename, "w", encoding="utf-8") as af:
                 af.write(file_content)
-                
             saved_artifacts.append(safe_filename)
 
-        if len(result_text) < 20:
-            status = "failed_validation (output too short)"
+        if len(result_text) < 20: status = "failed_validation"
             
     except Exception as e:
-        result_text = f"Worker Error: {str(e)}"
-        status = "error"
+        result_text, status = f"Worker Error: {str(e)}", "error"
+        prompt_tokens, comp_tokens, tot_tokens = 0, 0, 0
 
     elapsed = round(time.time() - start_time, 2)
     task_tps = round(comp_tokens / elapsed, 2) if elapsed > 0 else 0
     
     return {
-        "id": task_id,
-        "prompt": task_prompt,
-        "result": result_text,
-        "artifacts": saved_artifacts,
-        "status": status,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": comp_tokens,
-        "total_tokens": tot_tokens,
-        "elapsed": elapsed,
-        "tps": task_tps
+        "id": task_id, "prompt": task_prompt, "result": result_text,
+        "artifacts": saved_artifacts, "status": status,
+        "prompt_tokens": prompt_tokens, "completion_tokens": comp_tokens,
+        "total_tokens": tot_tokens, "elapsed": elapsed, "tps": task_tps
     }
 
 def dispatch_and_gather(sub_tasks: list, original_query: str, run_dir: Path) -> list:
-    """Distributes tasks across a dynamic pool of worker endpoints with auto-retries."""
     max_concurrent = len(WORKER_ENDPOINTS) * WORKER_PARALLEL_SLOTS
     print(f"\n[4] 🚀 DISPATCH: Firing up to {max_concurrent} simultaneous tasks using Dynamic Load Balancing...", flush=True)
     
     endpoint_queue = queue.Queue()
     for ep in WORKER_ENDPOINTS:
-        for _ in range(WORKER_PARALLEL_SLOTS):
-            endpoint_queue.put(ep)
+        for _ in range(WORKER_PARALLEL_SLOTS): endpoint_queue.put(ep)
 
     def dynamic_worker(tid: int, prompt: str):
         last_result = None
         for attempt in range(1, WORKER_RETRIES + 1):
             endpoint = endpoint_queue.get()
-            
             try:
-                if attempt > 1:
-                    print(f"    [↻] [Thread-{tid:02d}] Retrying (Attempt {attempt}/{WORKER_RETRIES}) on {endpoint}...", flush=True)
-                    
                 result = process_subtask(tid, prompt, endpoint, original_query, run_dir)
-                
-                if result["status"] == "success":
-                    return result
-                    
+                if result["status"] == "success": return result
                 last_result = result
-                print(f"    [!] [Thread-{tid:02d}] Task failed on {endpoint} | Status: {result['status']}", flush=True)
-                
             except Exception as e:
-                print(f"    [!] [Thread-{tid:02d}] Hard crash on {endpoint}: {e}", flush=True)
-                last_result = {
-                    "id": tid, "prompt": prompt, "result": f"Hard crash: {str(e)}", 
-                    "artifacts": [], "status": "error", "prompt_tokens": 0, "completion_tokens": 0, 
-                    "total_tokens": 0, "elapsed": 0, "tps": 0
-                }
+                last_result = {"id": tid, "status": "error", "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "elapsed": 0, "tps": 0}
             finally:
                 endpoint_queue.put(endpoint)
-                
-            if attempt < WORKER_RETRIES:
-                time.sleep(2)
-                
-        print(f"    [❌] [Thread-{tid:02d}] Exhausted all {WORKER_RETRIES} retries. Marking task as failed.", flush=True)
+            time.sleep(2)
         return last_result
 
     results = []
     aggregate_total_tokens = 0
     aggregate_completion_tokens = 0
-    aggregate_time = 0.0
+    
+    # strictly tracks true parallel duration
+    dispatch_start_time = time.time()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
-        future_to_task = {
-            executor.submit(dynamic_worker, i + 1, task): i + 1 
-            for i, task in enumerate(sub_tasks)
-        }
+        future_to_task = {executor.submit(dynamic_worker, i + 1, task): i + 1 for i, task in enumerate(sub_tasks)}
         
         for future in concurrent.futures.as_completed(future_to_task):
-            try:
-                task_result = future.result()
-                results.append(task_result)
-                
-                aggregate_total_tokens += task_result["total_tokens"]
-                aggregate_completion_tokens += task_result["completion_tokens"]
-                aggregate_time += task_result["elapsed"]
-                
-                agg_tps = round(aggregate_completion_tokens / aggregate_time, 2) if aggregate_time > 0 else 0
-                
-                print(f"    <- [Thread-{task_result['id']:02d}] Finished in {task_result['elapsed']}s | "
-                      f"Status: {task_result['status']} | "
-                      f"Task TPS: {task_result['tps']} | "
-                      f"Agg TPS: {agg_tps} | "
-                      f"Total Tokens: {aggregate_total_tokens:,}", flush=True)
-                      
-            except Exception as exc:
-                print(f"    [!] Thread generated an exception: {exc}", flush=True)
+            task_result = future.result()
+            results.append(task_result)
+            
+            aggregate_total_tokens += task_result["total_tokens"]
+            aggregate_completion_tokens += task_result["completion_tokens"]
+            
+            current_elapsed = time.time() - dispatch_start_time
+            agg_tps = round(aggregate_completion_tokens / current_elapsed, 2) if current_elapsed > 0 else 0
+            
+            print(f"    <- [Thread-{task_result['id']:02d}] Finished in {task_result['elapsed']}s | "
+                  f"Status: {task_result['status']} | "
+                  f"Task TPS: {task_result['tps']} | "
+                  f"Agg TPS: {agg_tps} | "
+                  f"Total Tokens: {aggregate_total_tokens:,}", flush=True)
 
     results.sort(key=lambda x: x["id"])
     return results
@@ -321,54 +272,42 @@ def dispatch_and_gather(sub_tasks: list, original_query: str, run_dir: Path) -> 
 # ==============================================================================
 
 def process_map_reduce_batch(batch_idx: int, batch: list, endpoint: str, original_query: str) -> tuple:
-    """Asynchronous pipeline task routing map-reduce operations into the cluster."""
     client = OpenAI(base_url=endpoint, api_key=ORCH_API_KEY)
     
-    system_prompt = """You are the Map-Reduce compression layer of a distributed AI cluster. 
-Read the assigned worker node reports and consolidate them into an ultra-dense, deduplicated brief.
-1. DEDUPLICATE: Wipe out overlapping syntax, identical logic setups, and structural clone text.
-2. RETAIN: Maintain absolute preservation of unique artifact code structures, parameters, and paths.
-3. CONDENSE: Truncate standard logs or structural filler down to dense bullet points."""
-
+    system_prompt = "You are the Map-Reduce compression layer of a distributed AI cluster. DEDUPLICATE, RETAIN, and CONDENSE."
     batch_context = ""
     for t in batch:
-        artifact_note = f" (Generated Files: {', '.join(t['artifacts'])})" if t['artifacts'] else ""
-        batch_context += f"--- Sub-Task: {t['prompt']} ---\nSTATUS: {t['status']}{artifact_note}\nRESULT:\n{t['result']}\n\n"
+        batch_context += f"--- Sub-Task: {t['prompt']} ---\nRESULT:\n{t['result']}\n\n"
         
-    user_prompt = f"ORIGINAL OVERALL QUERY: {original_query}\n\nREPORTS TO CONDENSE:\n{batch_context}"
+    user_prompt = f"ORIGINAL QUERY: {original_query}\n\nREPORTS TO CONDENSE:\n{batch_context}"
     
     try:
         start_time = time.time()
         response = client.chat.completions.create(
             model=ORCHESTRATOR_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.3,
-            max_tokens=16384
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            temperature=0.3, max_tokens=16384
         )
         elapsed = round(time.time() - start_time, 2)
         print(f"    [+] Batch {batch_idx} compressed via {endpoint} in {elapsed}s.", flush=True)
         
-        prompt_t = response.usage.prompt_tokens if response.usage else 0
-        comp_t = response.usage.completion_tokens if response.usage else 0
-        return response.choices[0].message.content.strip(), prompt_t, comp_t
-        
+        res_content = response.choices[0].message.content.strip()
+        if response.usage and response.usage.prompt_tokens > 0:
+            return res_content, response.usage.prompt_tokens, response.usage.completion_tokens
+        else:
+            return res_content, estimate_tokens(system_prompt + user_prompt), estimate_tokens(res_content)
+            
     except Exception as e:
-        print(f"    [!] Error during clustered Map-Reduce on batch {batch_idx} running on {endpoint}: {e}", flush=True)
-        return f"Batch {batch_idx} Failed compression on node {endpoint}. Raw data trace:\n{batch_context[:2000]}", 0, 0
+        print(f"    [!] Error during Map-Reduce on batch {batch_idx}: {e}", flush=True)
+        return f"Batch {batch_idx} Failed.", 0, 0
 
 def map_reduce_deduplication(completed_tasks: list, original_query: str) -> tuple:
-    """Splits reports into structured slices and pushes computation asynchronously across orchestrators."""
     print(f"\n[5] 🗜️ MAP-REDUCE: Activating orchestrator pool to compress {len(completed_tasks)} tasks...", flush=True)
-    
     batches = [completed_tasks[i:i + MAP_REDUCE_BATCH_SIZE] for i in range(0, len(completed_tasks), MAP_REDUCE_BATCH_SIZE)]
     
     orch_queue = queue.Queue()
     for ep in ORCHESTRATOR_ENDPOINTS:
-        for _ in range(ORCH_PARALLEL_SLOTS):
-            orch_queue.put(ep)
+        for _ in range(ORCH_PARALLEL_SLOTS): orch_queue.put(ep)
             
     max_orch_concurrency = len(ORCHESTRATOR_ENDPOINTS) * ORCH_PARALLEL_SLOTS
     condensed_reports = [None] * len(batches)
@@ -378,93 +317,68 @@ def map_reduce_deduplication(completed_tasks: list, original_query: str) -> tupl
     def worker_wrapper(idx, batch):
         endpoint = orch_queue.get()
         try:
-            result_text, p_tok, c_tok = process_map_reduce_batch(idx, batch, endpoint, original_query)
-            return idx, result_text, p_tok, c_tok
-        finally:
-            orch_queue.put(endpoint)
+            return idx, *process_map_reduce_batch(idx, batch, endpoint, original_query)
+        finally: orch_queue.put(endpoint)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_orch_concurrency) as executor:
         futures = {executor.submit(worker_wrapper, i + 1, b): i for i, b in enumerate(batches)}
         for future in concurrent.futures.as_completed(futures):
-            try:
-                batch_id, result_text, p_tok, c_tok = future.result()
-                condensed_reports[batch_id - 1] = result_text
-                total_prompt_tokens += p_tok
-                total_comp_tokens += c_tok
-            except Exception as e:
-                print(f"    [!] Critical Thread Execution Fault across map-reduce thread context: {e}")
+            batch_id, result_text, p_tok, c_tok = future.result()
+            condensed_reports[batch_id - 1] = result_text
+            total_prompt_tokens += p_tok
+            total_comp_tokens += c_tok
 
-    final_reports = [report for report in condensed_reports if report is not None]
-    return final_reports, total_prompt_tokens, total_comp_tokens
+    return [r for r in condensed_reports if r is not None], total_prompt_tokens, total_comp_tokens
 
 # ==============================================================================
 # Phase 5: Synthesis
 # ==============================================================================
 
 def synthesize_results(original_query: str, condensed_reports: list) -> tuple:
-    """Takes the mapped/reduced outputs and synthesizes the final comprehensive answer."""
     print("\n[6] 🧠 SYNTHESIS: Consolidating reduced reports into final output...", flush=True)
-    
     consolidated_context = "\n".join([f"--- CONDENSED BATCH {i+1} ---\n{report}\n" for i, report in enumerate(condensed_reports)])
     
-    system_prompt = """You are the Synthesis Layer of a master AI orchestrator.
-Read the original user query and the condensed intelligence briefs provided.
-Merge these briefs into a single, cohesive, highly-detailed final response."""
-
+    system_prompt = "You are the Synthesis Layer. Merge these briefs into a cohesive final response."
     client = OpenAI(base_url=ORCHESTRATOR_ENDPOINTS[0], api_key=ORCH_API_KEY)
-    user_prompt = f"ORIGINAL QUERY: {original_query}\n\nCONDENSED INTELLIGENCE BRIEFS:\n{consolidated_context}"
+    user_prompt = f"ORIGINAL QUERY: {original_query}\n\nCONDENSED BRIEFS:\n{consolidated_context}"
 
     try:
         response = client.chat.completions.create(
             model=ORCHESTRATOR_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.5,
-            max_tokens=40960 
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            temperature=0.5, max_tokens=40960 
         )
         print("    [+] Synthesis complete.", flush=True)
+        res_content = response.choices[0].message.content.strip()
         
-        prompt_t = response.usage.prompt_tokens if response.usage else 0
-        comp_t = response.usage.completion_tokens if response.usage else 0
-        return response.choices[0].message.content.strip(), prompt_t, comp_t
-        
+        if response.usage and response.usage.prompt_tokens > 0:
+            return res_content, response.usage.prompt_tokens, response.usage.completion_tokens
+        else:
+            return res_content, estimate_tokens(system_prompt + user_prompt), estimate_tokens(res_content)
+            
     except Exception as e:
-        print(f"    [!] Error during synthesis: {e}", flush=True)
-        return f"Synthesis Phase Failed. Orchestrator Error: {str(e)}", 0, 0
+        return f"Synthesis Failed. Error: {str(e)}", 0, 0
 
 # ==============================================================================
 # Main Execution Engine
 # ==============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Unified Clustered LLM Orchestrator Engine")
+    parser = argparse.ArgumentParser(description="Unified Clustered LLM Orchestrator")
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("-f", "--file", type=str, help="Path to a text file containing the prompt/query.")
-    group.add_argument("-p", "--prompt", type=str, help="Direct string input of the prompt/query.")
+    group.add_argument("-f", "--file", type=str, help="Path to prompt file.")
+    group.add_argument("-p", "--prompt", type=str, help="Direct prompt input.")
     args = parser.parse_args()
     
     if args.file:
-        if not os.path.exists(args.file):
-            print(f"[!] Fatal Error: The file '{args.file}' does not exist.", flush=True)
-            sys.exit(1)
-        with open(args.file, "r", encoding="utf-8") as f:
-            target_query = f.read()
-        print(f"[*] Loaded query from file: {args.file}", flush=True)
+        with open(args.file, "r", encoding="utf-8") as f: target_query = f.read()
     elif args.prompt:
         target_query = args.prompt
-        print("[*] Loaded query from command line argument.", flush=True)
     else:
-        print("[*] No input arguments provided. Using lightweight default test query.", flush=True)
-        target_query = """
-        Create a simple Python HTTP server using Flask that returns 'Hello, Orchestrator!' 
-        on the root endpoint. Also, write a standard Dockerfile to containerize it.
-        """
+        target_query = "Create a simple Python HTTP server using Flask that returns 'Hello, Orchestrator!' on the root endpoint. Also, write a standard Dockerfile to containerize it."
         
     print("\n=== STARTING UNIFIED DISTRIBUTED ORCHESTRATOR CLUSTER ===", flush=True)
     
-    # Trackers for Grand Totals
     master_start_time = time.time()
     global_input_tokens = 0
     global_output_tokens = 0
@@ -493,17 +407,12 @@ if __name__ == "__main__":
     global_input_tokens += p_tok
     global_output_tokens += c_tok
     
-    # Master Execution Timer
     master_elapsed_time = time.time() - master_start_time
     
     print("\n[7] 💾 MASTER EXPORT: Saving final synthesis to disk...", flush=True)
     final_file_path = run_directory / "FINAL_SYNTHESIS.md"
-    try:
-        with open(final_file_path, "w", encoding="utf-8") as f:
-            f.write(final_output)
-        print(f"    [+] Successfully saved final output to: {final_file_path.absolute()}", flush=True)
-    except Exception as e:
-        print(f"    [!] Failed to save final output to disk: {e}", flush=True)
+    with open(final_file_path, "w", encoding="utf-8") as f:
+        f.write(final_output)
     
     print("\n==============================================================================", flush=True)
     print("✨ EXECUTION RUN COMPLETE ✨", flush=True)
@@ -513,5 +422,4 @@ if __name__ == "__main__":
     print(f"    📊 Total Cluster Tokens:   {global_input_tokens + global_output_tokens:,}", flush=True)
     print(f"    [+] Synthesis Payload Size: {len(final_output):,} characters", flush=True)
     print(f"    📂 Run Master Directory:    {run_directory.absolute()}", flush=True)
-    print(f"    📝 Final Document Path:     {final_file_path.absolute()}", flush=True)
     print("==============================================================================", flush=True)
