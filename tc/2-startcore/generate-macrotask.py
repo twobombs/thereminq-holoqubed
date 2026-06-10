@@ -8,6 +8,7 @@ import sys
 import argparse
 import time
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from openai import OpenAI
@@ -89,6 +90,17 @@ def generate_content(prompt: str, target_dir: Path):
             f.write(full_content.strip())
             
         print(f"[3] 💾 Saved raw content to: {filepath.absolute()}")
+        
+        # Execute the distillation script
+        print(f"\n[4] ⚙️ Executing distill-macrotask.py on {filename}...")
+        try:
+            # sys.executable ensures we use the exact same python environment
+            subprocess.run([sys.executable, "distill-macrotask.py", str(filepath.absolute())], check=True)
+            print("[+] Distillation complete.")
+        except subprocess.CalledProcessError as e:
+            print(f"[!] Error: distill-macrotask.py returned a non-zero exit status: {e}")
+        except FileNotFoundError:
+            print("[!] Error: distill-macrotask.py could not be found. Ensure it is in the same directory.")
 
     except Exception as e:
         print(f"\n[!] Fatal Error during generation: {e}")
