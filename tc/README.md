@@ -48,6 +48,10 @@ A collection of auxiliary utilities and autonomous workflows for the ThereminQ H
     **Functional Description:** A utility script to stream the generation of large markdown documents or raw content using a local LLM based on a direct prompt or an input file.
     **Internal Workings:** It calls the local LLM endpoint with a system prompt optimized for expert technical writing. It streams the response to the console in real-time and ultimately saves the output as a distinct markdown file in a categorized `raw/` subdirectory with a safely generated timestamped filename.
 
+*   **`2-startcore/macrotask-example-prompt.txt`**
+    **Functional Description:** A comprehensive, highly structured LLM prompt designed to elicit a deep, interdisciplinary synthesis combining agile project management, quantum mechanical computational principles, and llm wiki methodics.
+    **Internal Workings:** This text file provides a standardized, complex input that can be fed into `generate-macrotask.py` to test the agentic pipeline's ability to handle demanding, multi-faceted constraints and structure generation.
+
 ### Agile Engine (`3-agilengine/`)
 
 *   **`3-agilengine/AgenticAgile.py`**
