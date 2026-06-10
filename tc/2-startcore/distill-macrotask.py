@@ -117,4 +117,4 @@ if __name__ == "__main__":
     print(actionable_tasks, flush=True)
     print("\n==============================================================================", flush=True)
     print(f"[+] Distilled file saved to: {saved_path}", flush=True)
-    print(f"[*] Suggested next step: python full-agentic-workflow.py -f {saved_path}", flush=True)
+    print(f"[*] Suggested next step: python3 full-agentic-workflow.py -f {saved_path}", flush=True)
