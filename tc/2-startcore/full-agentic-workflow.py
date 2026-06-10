@@ -6,6 +6,7 @@ import re
 import argparse
 import concurrent.futures
 import queue
+import threading
 from datetime import datetime
 from pathlib import Path
 from openai import OpenAI
@@ -267,7 +268,7 @@ def execute_rolling_pipeline(sub_tasks: list, original_query: str, run_dir: Path
     max_worker_concurrent = len(WORKER_ENDPOINTS) * WORKER_PARALLEL_SLOTS
     
     print(f"\n[4] 🚀 ROLLING PIPELINE: Launching parallel workers and continuous sequential synthesis...", flush=True)
-    print(f"    [i] Diagnostics: {len(sub_tasks)} tasks generated. Master document will compile continuously.", flush=True)
+    print(f"    [i] Diagnostics: {len(sub_tasks)} tasks generated. Master document will compile continuously in background.", flush=True)
 
     worker_queue = queue.Queue()
     for ep in WORKER_ENDPOINTS:
@@ -276,6 +277,39 @@ def execute_rolling_pipeline(sub_tasks: list, original_query: str, run_dir: Path
     orch_queue = queue.Queue()
     for ep in ORCHESTRATOR_ENDPOINTS:
         for _ in range(ORCH_PARALLEL_SLOTS): orch_queue.put(ep)
+
+    synthesis_queue = queue.Queue()
+    
+    # State tracking variables modified by threads
+    master_synthesis_document = ""
+    orch_p_tok, orch_c_tok = 0, 0
+    total_tasks = len(sub_tasks)
+
+    # Dedicated thread for processing continuous synthesis
+    def synthesis_consumer():
+        nonlocal master_synthesis_document, orch_p_tok, orch_c_tok
+        while True:
+            target_task = synthesis_queue.get()
+            if target_task is None:  # Sentinel value to exit
+                synthesis_queue.task_done()
+                break
+                
+            orch_endpoint = orch_queue.get()
+            try:
+                print(f"    [>] Pipeline trigger: Routing Step {target_task['id']}/{total_tasks} into Master Document...", flush=True)
+                new_synth, p_tok, c_tok = rolling_synthesis_step(
+                    target_task['id'], total_tasks, master_synthesis_document, 
+                    target_task, orch_endpoint, original_query
+                )
+                
+                if new_synth:  
+                    master_synthesis_document = new_synth
+                    
+                orch_p_tok += p_tok
+                orch_c_tok += c_tok
+            finally:
+                orch_queue.put(orch_endpoint)
+                synthesis_queue.task_done()
 
     def worker_wrapper(tid: int, prompt: str):
         last_result = None
@@ -295,19 +329,19 @@ def execute_rolling_pipeline(sub_tasks: list, original_query: str, run_dir: Path
             time.sleep(2)
         return last_result
 
+    # Start the synthesis background worker
+    synth_thread = threading.Thread(target=synthesis_consumer, daemon=True)
+    synth_thread.start()
+
     results_dict = {}
-    master_synthesis_document = ""
-    total_tasks = len(sub_tasks)
     next_needed_task_id = 1
-    
     worker_p_tok, worker_c_tok = 0, 0
-    orch_p_tok, orch_c_tok = 0, 0
     dispatch_start_time = time.time()
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_worker_concurrent) as worker_exec:
         future_to_task = {worker_exec.submit(worker_wrapper, i + 1, task): i + 1 for i, task in enumerate(sub_tasks)}
         
-        # Monitor workers as they finish asynchronously
+        # Main thread simply monitors workers and feeds the synthesis queue seamlessly
         for future in concurrent.futures.as_completed(future_to_task):
             task_result = future.result()
             tid = task_result["id"]
@@ -323,27 +357,17 @@ def execute_rolling_pipeline(sub_tasks: list, original_query: str, run_dir: Path
                   f"Status: {task_result['status']} | "
                   f"Agg Worker TPS: {agg_tps}", flush=True)
 
-            # Check if the next sequential task is ready for the Master Synthesis Document
+            # Route ready, sequential results immediately to the async queue
             while next_needed_task_id in results_dict:
-                target_task = results_dict.pop(next_needed_task_id)
-                orch_endpoint = orch_queue.get()
-                
-                try:
-                    print(f"    [>] Pipeline trigger: Routing Step {next_needed_task_id}/{total_tasks} into Master Document...", flush=True)
-                    new_synth, p_tok, c_tok = rolling_synthesis_step(
-                        next_needed_task_id, total_tasks, master_synthesis_document, 
-                        target_task, orch_endpoint, original_query
-                    )
-                    
-                    if new_synth:  
-                        master_synthesis_document = new_synth
-                        
-                    orch_p_tok += p_tok
-                    orch_c_tok += c_tok
-                finally:
-                    orch_queue.put(orch_endpoint)
-                    
+                synthesis_queue.put(results_dict.pop(next_needed_task_id))
                 next_needed_task_id += 1
+                
+    # All workers finished. Push sentinel to cleanly shutdown synthesis queue.
+    synthesis_queue.put(None)
+    
+    # Wait for the background synthesis thread to catch up and finalize
+    synthesis_queue.join()
+    synth_thread.join()
                 
     return master_synthesis_document, worker_p_tok, worker_c_tok, orch_p_tok, orch_c_tok
 
