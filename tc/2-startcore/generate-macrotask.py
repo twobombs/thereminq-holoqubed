@@ -1,3 +1,8 @@
+# this helper script can be used for testing the agentic pipeline by generating content by means of 2 or 3 words input
+#
+# its output can then be fed to be distilled into agent compatible mission statements by distill-macrotask.py
+#
+
 import os
 import sys
 import argparse
