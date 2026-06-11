@@ -17,7 +17,7 @@ from openai import OpenAI
 
 ORCHESTRATOR_ENDPOINTS = [
     "http://192.168.2.137:8080/v1",
-    "http://192.168.2.137:8080/v1"
+    "http://192.168.2.134:8080/v1"
 ]
 ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "nvidia_Orchestrator-8B-Q6_K.gguf")
 ORCH_API_KEY = os.getenv("ORCH_API_KEY", "local-sk")
@@ -33,6 +33,7 @@ WORKER_API_KEY = os.getenv("WORKER_API_KEY", "local-sk")
 WORKER_PARALLEL_SLOTS = 2
 WORKER_RETRIES = 3
 ORCH_PARALLEL_SLOTS = 2
+SYNTHESIS_CHUNK_SIZE = 3  
 
 BASE_DIR = Path(__file__).parent
 
@@ -41,7 +42,6 @@ BASE_DIR = Path(__file__).parent
 # ==============================================================================
 
 def estimate_tokens(text: str) -> int:
-    """Fallback token calculation if local endpoints drop the usage object."""
     return len(str(text)) // 4
 
 # ==============================================================================
@@ -67,8 +67,7 @@ Output ONLY a valid, flat JSON array of strings. No markdown formatting, no conv
     for attempt in range(1, MAX_RETRIES + 1):
         print(f"[2] 🔬 DECOMPOSITION: Engaging atomic breakdown via {target_orch} (Attempt {attempt}/{MAX_RETRIES})...", flush=True)
         raw_output = ""
-        prompt_tokens = 0
-        comp_tokens = 0
+        prompt_tokens, comp_tokens = 0, 0
         
         try:
             start_time = time.time()
@@ -78,33 +77,25 @@ Output ONLY a valid, flat JSON array of strings. No markdown formatting, no conv
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Decompose this to the atomic level:\n\n{large_query}"}
                 ],
-                temperature=0.7, 
-                max_tokens=40960,
-                stream=True,
-                stream_options={"include_usage": True},
-                timeout=600.0
+                temperature=0.7, max_tokens=40960, stream=True,
+                stream_options={"include_usage": True}, timeout=600.0
             )
             
             print("    [~] Streaming Live Generation:\n    >> ", end="", flush=True)
-            
             for chunk in response:
                 if chunk.choices and chunk.choices[0].delta.content is not None:
                     text_chunk = chunk.choices[0].delta.content
                     print(text_chunk, end="", flush=True)
                     raw_output += text_chunk
-                
                 if hasattr(chunk, 'usage') and chunk.usage is not None:
                     prompt_tokens = chunk.usage.prompt_tokens
                     comp_tokens = chunk.usage.completion_tokens
                     
             print("\n", flush=True) 
-            
             cleaned_output = extract_json_array(raw_output)
-            if not cleaned_output:
-                raise ValueError("Could not locate a JSON array in the LLM response.")
-                
-            atomic_pieces = json.loads(cleaned_output)
+            if not cleaned_output: raise ValueError("Could not locate JSON array.")
             
+            atomic_pieces = json.loads(cleaned_output)
             if prompt_tokens == 0 and comp_tokens == 0:
                 prompt_tokens = estimate_tokens(system_prompt + large_query)
                 comp_tokens = estimate_tokens(raw_output)
@@ -123,7 +114,7 @@ Output ONLY a valid, flat JSON array of strings. No markdown formatting, no conv
     return [large_query], estimate_tokens(large_query), 10
 
 # ==============================================================================
-# Phase 2: Audit Trail / File Export Setup
+# Phase 2: Audit Trail Setup
 # ==============================================================================
 
 def export_to_split_files(pieces: list) -> Path:
@@ -142,15 +133,14 @@ def export_to_split_files(pieces: list) -> Path:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(f"{piece.strip()}\n")
             
-    print(f"    [+] Saved {len(pieces)} task files to {tasks_dir.absolute()}/", flush=True)
     return run_dir
 
 # ==============================================================================
-# Phase 3: Rolling Synthesis Pipeline
+# Pipeline Processors
 # ==============================================================================
 
 def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_query: str, run_dir: Path) -> dict:
-    print(f"    -> [Thread-{task_id:02d}] Dispatched to {endpoint} | Task: '{task_prompt[:40]}...' ", flush=True)
+    print(f"    -> [Worker-{task_id:02d}] Dispatched to {endpoint} | Task: '{task_prompt[:40]}...' ", flush=True)
     
     worker_client = OpenAI(base_url=endpoint, api_key=WORKER_API_KEY)
     start_time = time.time()
@@ -170,22 +160,12 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
     try:
         response = worker_client.chat.completions.create(
             model=WORKER_MODEL,
-            messages=[
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": user_instruction}
-            ],
+            messages=[{"role": "system", "content": system_instruction}, {"role": "user", "content": user_instruction}],
             temperature=0.4, max_tokens=65536, timeout=1200.0,   
         )
         result_text = response.choices[0].message.content.strip()
-        
-        if response.usage and response.usage.prompt_tokens > 0:
-            prompt_tokens = response.usage.prompt_tokens
-            comp_tokens = response.usage.completion_tokens
-        else:
-            prompt_tokens = estimate_tokens(system_instruction + user_instruction)
-            comp_tokens = estimate_tokens(result_text)
-            
-        tot_tokens = prompt_tokens + comp_tokens
+        prompt_tokens = response.usage.prompt_tokens if response.usage else estimate_tokens(system_instruction + user_instruction)
+        comp_tokens = response.usage.completion_tokens if response.usage else estimate_tokens(result_text)
         
         file_matches = re.finditer(r'<file\s+path="([^"]+)">([\s\S]*?)</file>', result_text, re.IGNORECASE)
         for match in file_matches:
@@ -193,80 +173,93 @@ def process_subtask(task_id: int, task_prompt: str, endpoint: str, original_quer
             safe_filename = os.path.basename(file_path)
             artifact_dir = run_dir / "artifacts" / f"thread_{task_id:02d}"
             artifact_dir.mkdir(parents=True, exist_ok=True)
-            
-            with open(artifact_dir / safe_filename, "w", encoding="utf-8") as af:
-                af.write(file_content)
+            with open(artifact_dir / safe_filename, "w", encoding="utf-8") as af: af.write(file_content)
             saved_artifacts.append(safe_filename)
 
         if len(result_text) < 20: status = "failed_validation"
             
     except Exception as e:
         result_text, status = f"Worker Error: {str(e)}", "error"
-        prompt_tokens, comp_tokens, tot_tokens = 0, 0, 0
+        prompt_tokens, comp_tokens = 0, 0
 
     elapsed = round(time.time() - start_time, 2)
-    task_tps = round(comp_tokens / elapsed, 2) if elapsed > 0 else 0
-    
     return {
         "id": task_id, "prompt": task_prompt, "result": result_text,
         "artifacts": saved_artifacts, "status": status,
         "prompt_tokens": prompt_tokens, "completion_tokens": comp_tokens,
-        "total_tokens": tot_tokens, "elapsed": elapsed, "tps": task_tps
+        "total_tokens": prompt_tokens + comp_tokens, "elapsed": elapsed, 
+        "tps": round(comp_tokens / elapsed, 2) if elapsed > 0 else 0
     }
 
-def rolling_synthesis_step(step_idx: int, total_steps: int, current_synthesis: str, task: dict, endpoint: str, original_query: str) -> tuple:
+def parallel_chunk_synthesis(batch_id: int, tasks: list, endpoint: str, original_query: str) -> tuple:
     client = OpenAI(base_url=endpoint, api_key=ORCH_API_KEY)
     
     system_prompt = (
-        "You are the Master Synthesizer of a distributed AI cluster. "
-        "Your job is to seamlessly integrate incoming sequential worker reports into a master unified document. "
-        "DEDUPLICATE overlapping information. Retain all original code and configurations. "
-        "Format cleanly to create a cohesive final output."
+        "You are a Level-1 Synthesis Node in a distributed cluster. "
+        "Merge the following sequential worker reports into a coherent, deduplicated section. "
+        "Retain all code blocks, configurations, and critical technical data."
     )
-    
-    if not current_synthesis:
-        user_prompt = (
-            f"ORIGINAL QUERY: {original_query}\n\n"
-            f"--- INITIAL DATA (Step {step_idx}/{total_steps}) ---\n"
-            f"Task Addressed: {task['prompt']}\n\n"
-            f"Worker Output:\n{task['result']}\n\n"
-            "INSTRUCTION: Establish the master document based on this initial data."
-        )
-    else:
-        user_prompt = (
-            f"ORIGINAL QUERY: {original_query}\n\n"
-            f"--- CURRENT MASTER DOCUMENT (Steps 1 to {step_idx - 1}) ---\n"
-            f"{current_synthesis}\n\n"
-            f"--- NEW DATA TO INTEGRATE (Step {step_idx}/{total_steps}) ---\n"
-            f"Task Addressed: {task['prompt']}\n\n"
-            f"Worker Output:\n{task['result']}\n\n"
-            "INSTRUCTION: Merge the NEW DATA into the CURRENT MASTER DOCUMENT. "
-            "Do not throw away previous work. Expand, refine, and seamlessly integrate the new data."
-        )
+    batch_context = "\n\n".join([f"--- TASK {t['id']}: {t['prompt']} ---\n{t['result']}" for t in tasks])
+    user_prompt = f"ORIGINAL QUERY: {original_query}\n\nREPORTS TO MERGE:\n{batch_context}"
         
-    start_time = time.time()
-    response = client.chat.completions.create(
-        model=ORCHESTRATOR_MODEL,
-        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-        temperature=0.3, max_tokens=40960
-    )
-    elapsed = round(time.time() - start_time, 2)
-    print(f"    [+] Synthesis of Step {step_idx}/{total_steps} via {endpoint} completed in {elapsed}s.", flush=True)
-    
-    res_content = response.choices[0].message.content.strip()
-    if not res_content:
-        raise ValueError("Received empty response from the synthesis layer.")
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            start_time = time.time()
+            response = client.chat.completions.create(
+                model=ORCHESTRATOR_MODEL,
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+                temperature=0.3, max_tokens=40960
+            )
+            elapsed = round(time.time() - start_time, 2)
+            
+            res_content = response.choices[0].message.content.strip()
+            p_tok = response.usage.prompt_tokens if response.usage else estimate_tokens(system_prompt + user_prompt)
+            c_tok = response.usage.completion_tokens if response.usage else estimate_tokens(res_content)
+            return batch_id, res_content, p_tok, c_tok, elapsed
+            
+        except Exception as e:
+            time.sleep(2)
+            
+    print(f"    [!] CRITICAL: Chunk {batch_id} failed synthesis. Falling back to raw concatenation.", flush=True)
+    return batch_id, f"\n--- [RAW CHUNK {batch_id}] ---\n" + batch_context, 0, 0, 0
 
-    if response.usage and response.usage.prompt_tokens > 0:
-        return res_content, response.usage.prompt_tokens, response.usage.completion_tokens
-    else:
-        return res_content, estimate_tokens(system_prompt + user_prompt), estimate_tokens(res_content)
-
-def execute_rolling_pipeline(sub_tasks: list, original_query: str, run_dir: Path) -> tuple:
-    max_worker_concurrent = len(WORKER_ENDPOINTS) * WORKER_PARALLEL_SLOTS
+def rolling_master_stitch(chunk_id: int, current_master: str, new_chunk: str, endpoint: str, original_query: str) -> tuple:
+    client = OpenAI(base_url=endpoint, api_key=ORCH_API_KEY)
     
-    print(f"\n[4] 🚀 ROLLING PIPELINE: Launching parallel workers and continuous sequential synthesis...", flush=True)
-    print(f"    [i] Diagnostics: {len(sub_tasks)} tasks generated. Master document will compile continuously in background.", flush=True)
+    system_prompt = "You are the Final Assembly Layer. Seamlessly weave the new sequential section into the existing master document. Expand the document logically. Do not drop existing data or code."
+    user_prompt = f"ORIGINAL QUERY: {original_query}\n\n--- CURRENT MASTER DOCUMENT ---\n{current_master}\n\n--- NEW SECTION {chunk_id} TO INTEGRATE ---\n{new_chunk}"
+    
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            start_time = time.time()
+            response = client.chat.completions.create(
+                model=ORCHESTRATOR_MODEL,
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+                temperature=0.3, max_tokens=65536
+            )
+            elapsed = round(time.time() - start_time, 2)
+            
+            res_content = response.choices[0].message.content.strip()
+            p_tok = response.usage.prompt_tokens if response.usage else estimate_tokens(system_prompt + user_prompt)
+            c_tok = response.usage.completion_tokens if response.usage else estimate_tokens(res_content)
+            return res_content, p_tok, c_tok, elapsed
+        except Exception as e:
+            time.sleep(2)
+            
+    print(f"    [!] CRITICAL: Master stitch failed on Chunk {chunk_id}. Falling back to raw append.", flush=True)
+    return current_master + f"\n\n--- SECTION {chunk_id} ---\n" + new_chunk, 0, 0, 0
+
+# ==============================================================================
+# Phase 3, 4 & 5: Continuous Map-Reduce Event Loop
+# ==============================================================================
+
+def execute_continuous_map_reduce(sub_tasks: list, original_query: str, run_dir: Path) -> tuple:
+    max_worker_concurrency = len(WORKER_ENDPOINTS) * WORKER_PARALLEL_SLOTS
+    max_orch_concurrency = len(ORCHESTRATOR_ENDPOINTS) * ORCH_PARALLEL_SLOTS
+    total_tasks = len(sub_tasks)
+    total_chunks = (total_tasks + SYNTHESIS_CHUNK_SIZE - 1) // SYNTHESIS_CHUNK_SIZE
+    
+    print(f"\n[4] 🚀 CONTINUOUS MAP-REDUCE: Launching parallel workers, chunks, and rolling master stitch...", flush=True)
 
     worker_queue = queue.Queue()
     for ep in WORKER_ENDPOINTS:
@@ -276,106 +269,148 @@ def execute_rolling_pipeline(sub_tasks: list, original_query: str, run_dir: Path
     for ep in ORCHESTRATOR_ENDPOINTS:
         for _ in range(ORCH_PARALLEL_SLOTS): orch_queue.put(ep)
 
-    synthesis_queue = queue.Queue()
-    
-    master_synthesis_document = ""
-    orch_p_tok, orch_c_tok = 0, 0
-    total_tasks = len(sub_tasks)
+    event_queue = queue.Queue()
+    stitch_queue = queue.Queue()
 
-    # Dedicated thread for processing continuous synthesis with retries and fallback
-    def synthesis_consumer():
-        nonlocal master_synthesis_document, orch_p_tok, orch_c_tok
-        while True:
-            target_task = synthesis_queue.get()
-            if target_task is None: 
-                synthesis_queue.task_done()
-                break
-                
-            success = False
-            for attempt in range(1, MAX_RETRIES + 1):
-                orch_endpoint = orch_queue.get()
-                try:
-                    print(f"    [>] Pipeline trigger: Routing Step {target_task['id']}/{total_tasks} into Master Document (Attempt {attempt}/{MAX_RETRIES})...", flush=True)
-                    new_synth, p_tok, c_tok = rolling_synthesis_step(
-                        target_task['id'], total_tasks, master_synthesis_document, 
-                        target_task, orch_endpoint, original_query
-                    )
-                    
-                    if new_synth:  
-                        master_synthesis_document = new_synth
-                        orch_p_tok += p_tok
-                        orch_c_tok += c_tok
-                        success = True
-                        break 
-                except Exception as e:
-                    print(f"    [!] Error during rolling synthesis on step {target_task['id']}: {e}", flush=True)
-                finally:
-                    orch_queue.put(orch_endpoint)
-                
-                time.sleep(2)
-
-            # Hard fallback to prevent silent data drop
-            if not success:
-                print(f"    [!] CRITICAL: Failed to synthesize Step {target_task['id']} after {MAX_RETRIES} attempts. Appending raw worker data as fallback.", flush=True)
-                fallback_text = f"\n\n--- [WARNING: RAW UNPROCESSED STEP {target_task['id']}] ---\nTask: {target_task['prompt']}\nResult:\n{target_task['result']}\n"
-                master_synthesis_document += fallback_text
-
-            synthesis_queue.task_done()
-
+    # --- Thread Wrappers that emit to the Event Loop ---
     def worker_wrapper(tid: int, prompt: str):
         last_result = None
         for _ in range(WORKER_RETRIES):
             endpoint = worker_queue.get()
             try:
-                result = process_subtask(tid, prompt, endpoint, original_query, run_dir)
-                if result["status"] == "success": return result
-                last_result = result
+                res = process_subtask(tid, prompt, endpoint, original_query, run_dir)
+                if res["status"] == "success": 
+                    event_queue.put(("worker", res))
+                    worker_queue.put(endpoint)
+                    return
+                last_result = res
             except Exception as e:
-                last_result = {
-                    "id": tid, "status": "error", "result": f"Worker Failed: {str(e)}", 
-                    "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "elapsed": 0, "tps": 0
-                }
+                last_result = {"id": tid, "status": "error", "result": f"Failed: {str(e)}", "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "elapsed": 0, "tps": 0}
             finally:
                 worker_queue.put(endpoint)
             time.sleep(2)
-        return last_result
+        event_queue.put(("worker", last_result))
 
-    # Start the synthesis background worker
-    synth_thread = threading.Thread(target=synthesis_consumer, daemon=True)
-    synth_thread.start()
+    def chunk_wrapper(batch_id: int, tasks: list):
+        endpoint = orch_queue.get()
+        try:
+            b_id, text, p_tok, c_tok, elap = parallel_chunk_synthesis(batch_id, tasks, endpoint, original_query)
+            event_queue.put(("chunk", b_id, text, p_tok, c_tok, elap))
+        finally:
+            orch_queue.put(endpoint)
 
-    results_dict = {}
-    next_needed_task_id = 1
+    # --- Level 2 Background Stitching Thread ---
+    master_document = ""
+    stitch_p_tok, stitch_c_tok = 0, 0
+    
+    def master_stitch_consumer():
+        nonlocal master_document, stitch_p_tok, stitch_c_tok
+        while True:
+            item = stitch_queue.get()
+            if item is None: 
+                stitch_queue.task_done()
+                break
+                
+            c_id, c_text = item
+            
+            if master_document == "":
+                print(f"    [🧵] Pipeline trigger: Chunk {c_id}/{total_chunks} is foundation. Establishing Master Document...", flush=True)
+                master_document = c_text
+            else:
+                orch_endpoint = orch_queue.get()
+                try:
+                    print(f"    [🧵] Pipeline trigger: Weaving Chunk {c_id}/{total_chunks} into Master Document...", flush=True)
+                    new_doc, p, c, elap = rolling_master_stitch(c_id, master_document, c_text, orch_endpoint, original_query)
+                    master_document = new_doc
+                    stitch_p_tok += p
+                    stitch_c_tok += c
+                    print(f"    [+] Master Stitch {c_id} completed in {elap}s.", flush=True)
+                finally:
+                    orch_queue.put(orch_endpoint)
+            
+            stitch_queue.task_done()
+
+    # Start the stitcher thread
+    stitch_thread = threading.Thread(target=master_stitch_consumer, daemon=True)
+    stitch_thread.start()
+
+    # --- Main Event Loop Variables ---
     worker_p_tok, worker_c_tok = 0, 0
+    chunk_p_tok, chunk_c_tok = 0, 0
+    
+    results_dict = {}
+    chunks_dict = {}
+    worker_stats_log = []
+    
+    next_chunk_start_id = 1
+    next_stitch_id = 1
+    chunk_id_counter = 1
+    chunks_completed = 0
     dispatch_start_time = time.time()
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_worker_concurrent) as worker_exec:
-        future_to_task = {worker_exec.submit(worker_wrapper, i + 1, task): i + 1 for i, task in enumerate(sub_tasks)}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_worker_concurrency) as worker_exec, \
+         concurrent.futures.ThreadPoolExecutor(max_workers=max_orch_concurrency) as orch_exec:
         
-        for future in concurrent.futures.as_completed(future_to_task):
-            task_result = future.result()
-            tid = task_result["id"]
-            results_dict[tid] = task_result
+        # Dispatch all workers to the executor pool
+        for i, task in enumerate(sub_tasks):
+            worker_exec.submit(worker_wrapper, i + 1, task)
             
-            worker_p_tok += task_result["prompt_tokens"]
-            worker_c_tok += task_result["completion_tokens"]
+        # The Event Loop
+        while chunks_completed < total_chunks:
+            event = event_queue.get()
             
-            current_elapsed = time.time() - dispatch_start_time
-            agg_tps = round(worker_c_tok / current_elapsed, 2) if current_elapsed > 0 else 0
-            
-            print(f"    <- [Worker-{tid:02d}] Finished in {task_result['elapsed']}s | "
-                  f"Status: {task_result['status']} | "
-                  f"Agg Worker TPS: {agg_tps}", flush=True)
+            if event[0] == "worker":
+                task_res = event[1]
+                tid = task_res["id"]
+                results_dict[tid] = task_res
+                worker_stats_log.append(task_res)
+                
+                worker_p_tok += task_res["prompt_tokens"]
+                worker_c_tok += task_res["completion_tokens"]
+                current_elap = time.time() - dispatch_start_time
+                agg_tps = round(worker_c_tok / current_elap, 2) if current_elap > 0 else 0
+                
+                print(f"    <- [Worker-{tid:02d}] Finished in {task_res['elapsed']}s | Status: {task_res['status']} | Agg TPS: {agg_tps}", flush=True)
 
-            while next_needed_task_id in results_dict:
-                synthesis_queue.put(results_dict.pop(next_needed_task_id))
-                next_needed_task_id += 1
+                # Check if a Level 1 chunk is ready
+                expected_end = min(next_chunk_start_id + SYNTHESIS_CHUNK_SIZE, total_tasks + 1)
+                chunk_ready = True
+                for i in range(next_chunk_start_id, expected_end):
+                    if i not in results_dict:
+                        chunk_ready = False
+                        break
+                        
+                if chunk_ready and next_chunk_start_id <= total_tasks:
+                    chunk_tasks = [results_dict.pop(i) for i in range(next_chunk_start_id, expected_end)]
+                    print(f"    [🗜️] Multithread trigger: Grouping tasks {chunk_tasks[0]['id']}-{chunk_tasks[-1]['id']} into Chunk {chunk_id_counter}...", flush=True)
+                    orch_exec.submit(chunk_wrapper, chunk_id_counter, chunk_tasks)
+                    next_chunk_start_id = expected_end
+                    chunk_id_counter += 1
+
+            elif event[0] == "chunk":
+                _, b_id, text, p_tok, c_tok, elap = event
+                chunks_dict[b_id] = text
+                chunk_p_tok += p_tok
+                chunk_c_tok += c_tok
+                chunks_completed += 1
                 
-    synthesis_queue.put(None)
-    synthesis_queue.join()
-    synth_thread.join()
-                
-    return master_synthesis_document, worker_p_tok, worker_c_tok, orch_p_tok, orch_c_tok
+                print(f"    <- [Chunk-{b_id:02d}] Compressed parallel batch in {elap}s.", flush=True)
+
+                # Feed the Level 2 Stitcher sequentially
+                while next_stitch_id in chunks_dict:
+                    stitch_text = chunks_dict.pop(next_stitch_id)
+                    stitch_queue.put((next_stitch_id, stitch_text))
+                    next_stitch_id += 1
+                    
+    # Shutdown stitch thread cleanly
+    stitch_queue.put(None)
+    stitch_queue.join()
+    stitch_thread.join()
+    
+    total_orch_p = chunk_p_tok + stitch_p_tok
+    total_orch_c = chunk_c_tok + stitch_c_tok
+
+    return master_document, worker_p_tok, worker_c_tok, total_orch_p, total_orch_c, worker_stats_log
 
 # ==============================================================================
 # Main Execution Engine
@@ -409,12 +444,19 @@ if __name__ == "__main__":
     # 2. File Setup
     run_directory = export_to_split_files(fragments)
     
-    # 3 & 4. Execution via Rolling Pipeline (Workers + Continuous Synthesis)
-    final_output, w_p, w_c, o_p, o_c = execute_rolling_pipeline(fragments, target_query, run_directory)
-    
+    # 3, 4, 5. Execution via Continuous Map-Reduce Pipeline
+    final_output, w_p, w_c, o_p, o_c, worker_stats = execute_continuous_map_reduce(fragments, target_query, run_directory)
     global_input_tokens += (w_p + o_p)
     global_output_tokens += (w_c + o_c)
     
+    # 6. Append Telemetry to Master Document
+    stats_md = "\n\n---\n## 📊 Worker Execution Statistics\n"
+    stats_md += "| Worker ID | Status | Elapsed (s) | Task TPS | Prompt Tokens | Comp Tokens | Total Tokens |\n"
+    stats_md += "|-----------|--------|-------------|----------|---------------|-------------|--------------|\n"
+    for stat in sorted(worker_stats, key=lambda x: x['id']):
+        stats_md += f"| Thread-{stat['id']:02d} | {stat['status']} | {stat.get('elapsed', 0)} | {stat.get('tps', 0)} | {stat.get('prompt_tokens', 0)} | {stat.get('completion_tokens', 0)} | {stat.get('total_tokens', 0)} |\n"
+    
+    final_output += stats_md
     master_elapsed_time = time.time() - master_start_time
     
     print("\n[5] 💾 MASTER EXPORT: Saving master synthesis to disk...", flush=True)
