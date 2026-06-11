@@ -80,23 +80,19 @@ launch_node() {
         # Using >> to append to the log file so crash data isn't overwritten on restart
         numactl --cpunodebind="${NUMA_NODE}" --membind="${NUMA_NODE}" "$SERVER_BIN" \
             -m "$MODEL" \
-            -c 131072 \
+            -c 196608 \
             -np 2 \
             -ngl 999 \
             -mg "${VULKAN_ID}" \
             --kv-unified \
             -fa on \
+            --no-cache-idle-slots \
             --split-mode none \
             --cache-type-k q8_0 \
             --cache-type-v q4_0 \
-            -t 6 \
-            -tb 6 \
-            -b 256 \
-            -ub 256 \
             --no-mmap \
             --spec-type draft-mtp \
             --spec-draft-n-max 3 \
-            --chat-template-kwargs '{"preserve_thinking": true}' \
             --host 0.0.0.0 \
             --port "${PORT}" \
             --tools all \
