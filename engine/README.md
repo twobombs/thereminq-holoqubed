@@ -26,6 +26,21 @@ Contains conceptual prototypes and verification harnesses for the Holoqubed engi
 
 ---
 
+### [`geometric-python-c_hf-implementation/`](geometric-python-c_hf-implementation/README.md)
+
+Geometric Atlas variant: the geometry of the activation manifold decides which MLP neurons are computed per token (contextual, certified-style routing) instead of only ordering weights in memory. One Python file with subcommands, PyOpenCL, no C++ build step.
+
+| File | Functionality | Use Cases |
+|------|---------------|-----------|
+| [`holoqubed_atlas.py`](geometric-python-c_hf-implementation/holoqubed_atlas.py) `forge` | **Atlas Forge**: learns a principal chart, Voronoi regions, per-region residual ellipsoid spreads, a Hilbert region curve and a Hilbert neuron layout from calibration text. Writes a mmap-able `.atlas` directory. | Offline conversion of OPT, GPT-2, Llama/Qwen style models. |
+| `holoqubed_atlas.py bench` | **Divergence Harness**: perplexity, top-1 agreement, KL, routed fraction, MLP work and DMA block locality vs the dense model and a static pruning baseline. | Tuning z, rank and regions. |
+| `holoqubed_atlas.py generate` | Greedy text generation through the atlas (OpenCL, NumPy reference or dense), optional dense comparison. | Interactive checks. |
+| `holoqubed_atlas.py serve` | **OpenAI-Compatible API**: `/v1/models`, `/v1/completions`, `/v1/chat/completions` with SSE streaming, stop strings, bearer key, per-request `atlas_z`. Standard library HTTP server. | Serve the atlas to OpenAI SDK clients, Open WebUI, LangChain. |
+| `holoqubed_atlas.py selftest` | OpenCL kernels `atlas_route_up` / `atlas_down` vs the NumPy reference router. | Validate a new device or driver. |
+| `holoqubed_atlas.py data` | Fetches WikiText-2 calibration and evaluation text. | Reproducing the measured results. |
+
+---
+
 ### [`gpt2-python-c_hf-implementation/`](gpt2-python-c_hf-implementation/README.md)
 
 Python and C++ implementation for integrating Holoqubed with Hugging Face GPT-2 models.
