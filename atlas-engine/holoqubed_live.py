@@ -174,7 +174,13 @@ class LiveSession:
 
     def _ensure_engine(self):
         if self.engine is None:
-            self.engine = H.AtlasCLEngine(self.dic, max_devices=self.args.gpus, host_dictionary=self.args.host_dictionary)
+            cl = H._require_cl()
+            devs = [d for p in cl.get_platforms() for d in p.get_devices()]
+            cpu_only = bool(devs) and not any(d.type & cl.device_type.GPU for d in devs)
+            # a CPU OpenCL device shares system RAM: use the mapped atlas in place instead of a second copy
+            host = self.args.host_dictionary or cpu_only
+            self.engine = H.AtlasCLEngine(self.dic, max_devices=self.args.gpus, host_dictionary=host)
+            print(f"OpenCL dictionary: {'zero-copy host memory' if host else 'uploaded to device memory'}", flush=True)
             self.rt.engine = self.engine
             self.engine_name = ", ".join(d.name.strip() for d in self.engine.devices)
 
@@ -373,7 +379,7 @@ PAGE = r"""<!doctype html>
 --s1:#3987e5;--s1soft:#256abf;--s2:#d95926;--seq0:#1d2a3a;--seq1:#9ec5f4;--warn:#c98500;--bad:#e66767}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
 header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--surface)}
-header h1{font-size:17px;margin:0;font-weight:650}header .meta{color:var(--ink2);font-size:13px}
+header h1{font-size:17px;margin:0;font-weight:650}header .meta{color:var(--ink2);font-size:13px;flex:1;min-width:0;overflow-wrap:anywhere}
 main{padding:16px 20px;display:grid;gap:14px;grid-template-columns:repeat(12,1fr);max-width:1500px;margin:0 auto}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
 .card h2{font-size:13px;font-weight:600;margin:0 0 8px;color:var(--ink2)}
@@ -402,7 +408,7 @@ th,td{text-align:right;padding:5px 8px;border-bottom:1px solid var(--line)}th:fi
 #status{font-size:12px;color:var(--ink2)}#status.err{color:var(--bad)}
 .note{font-size:12px;color:var(--ink3)}
 </style></head><body>
-<header><h1>Holoqubed Live</h1><span class="meta" id="meta">loading</span><span style="flex:1"></span>
+<header><h1>Holoqubed Live</h1><span class="meta" id="meta">loading</span>
 <button class="ghost" id="theme" title="Toggle light and dark">Theme</button></header>
 <main>
 <section class="card c12">
@@ -462,7 +468,7 @@ function fmt(v,d=1){return v==null||!isFinite(v)?'-':v.toFixed(d)}
 const tip=$('#tip');function showTip(e,html){tip.innerHTML=html;tip.style.display='block';const w=tip.offsetWidth,h=tip.offsetHeight;
 let x=e.clientX+14,y=e.clientY+14;if(x+w>innerWidth-8)x=e.clientX-w-14;if(y+h>innerHeight-8)y=e.clientY-h-14;tip.style.left=x+'px';tip.style.top=y+'px'}
 function hideTip(){tip.style.display='none'}
-function setup(cv){const r=window.devicePixelRatio||1,w=cv.clientWidth,h=+cv.getAttribute('height');cv.width=w*r;cv.height=h*r;cv.style.height=h+'px';
+function setup(cv){const r=window.devicePixelRatio||1,w=cv.clientWidth,h=+(cv.dataset.h||(cv.dataset.h=cv.getAttribute('height')));cv.width=w*r;cv.height=h*r;cv.style.height=h+'px';
 const g=cv.getContext('2d');g.setTransform(r,0,0,r,0,0);g.clearRect(0,0,w,h);g.font='11px system-ui,sans-serif';return[g,w,h]}
 function nice(max){if(!(max>0))return 1;const p=Math.pow(10,Math.floor(Math.log10(max))),m=max/p;return(m<=1?1:m<=2?2:m<=2.5?2.5:m<=5?5:10)*p}
 function qtl(a,q){const b=a.slice().sort((x,y)=>x-y);if(!b.length)return 0;const i=(b.length-1)*q,lo=Math.floor(i);return b[lo]+(b[Math.min(lo+1,b.length-1)]-b[lo])*(i-lo)}
@@ -597,8 +603,8 @@ $('#theme').onclick=()=>{const d=document.documentElement,cur=d.dataset.theme||(
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change',render);
 document.addEventListener('mousemove',e=>{const cv=e.target.closest&&e.target.closest('canvas');if(cv&&cv._hit)cv._hit(e);else hideTip()});
 document.addEventListener('mouseleave',hideTip);window.addEventListener('resize',render);
-fetch('/api/info').then(r=>r.json()).then(j=>{INFO=j;$('#meta').textContent=`${j.model}, ${(j.params/1e6).toFixed(0)}M parameters, ${j.threads} threads`+
-(j.atlas?`, atlas ${j.atlas.path} (${j.layers} layers, ${j.atlas.layers[0].regions} regions, rank ${j.atlas.layers[0].rank})`:', no atlas');
+fetch('/api/info').then(r=>r.json()).then(j=>{INFO=j;const shortName=s=>s.includes('/')&&s.startsWith('/')?s.split('/').filter(Boolean).slice(-2).join('/'):s;$('#meta').title=j.model;$('#meta').textContent=`${shortName(j.model)}, ${(j.params/1e6).toFixed(0)}M parameters, ${j.threads} threads`+
+(j.atlas?`, atlas ${shortName(j.atlas.path)} (${j.layers} layers, ${j.atlas.layers[0].regions} regions, rank ${j.atlas.layers[0].rank})`:', no atlas');
 j.backends.forEach(b=>{const o=document.createElement('option');o.value=b;o.textContent={torch:'torch (dense)',reference:'atlas, NumPy',opencl:'atlas, OpenCL'}[b];$('#backend').appendChild(o)});
 if(j.backends.includes('reference'))$('#backend').value='reference';$('#backend').onchange();
 for(let l=0;l<(j.atlas?j.layers:0);l++){const o=document.createElement('option');o.value=l;o.textContent=l;$('#layer').appendChild(o)}

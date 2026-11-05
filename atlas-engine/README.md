@@ -79,7 +79,7 @@ Evaluated neurons are computed exactly with the full weights. The approximation 
 | Quantum format | `python3 holoqubed_atlas.py qconvert --model_id Qwen/Qwen3-0.6B --calib wiki_calib.txt --eval wiki_test.txt --qrack_layer 14` |
 | Everything for Qwen3-0.6B | `./qwen_holoqubed.sh` |
 | Curve lookup | add `--lookup curve` (bench, generate, serve, selftest) |
-| Zero-copy dictionary in RAM | add `--host_dictionary` (generate, serve, selftest) |
+| Zero-copy dictionary in RAM | add `--host_dictionary` (generate, serve, selftest); the atlas is mapped copy-on-write, so OpenCL uses the file pages in place (Qwen3-0.6B on a CPU device: 234 MB instead of 1,375 MB anonymous memory) |
 
 `python3 holoqubed_atlas.py <subcommand> -h` lists every option.
 
@@ -571,23 +571,22 @@ Downloads Qwen3-0.6B, converts it both ways, runs every tool on it and ends in t
 | dashboard only, after a full run | `STAGES=8 bash qwen_holoqubed.sh` |
 | dashboard for another machine | `STAGES=8 LIVE_HOST=0.0.0.0 bash qwen_holoqubed.sh` |
 
----|---|
-| 1. dependencies | `pip install torch transformers numpy pyopencl pyqrack datasets huggingface_hub` |
-| 2. download | `huggingface_hub.snapshot_download` into `$WORK/model` |
-| 3. data | `data` (WikiText-2) |
-| 4. geometric atlas | `forge` (4096 calibration tokens), `selftest` (layers 0, 14, 27), `bench` (z, 2 windows), `generate` (OpenCL, `--compare`) |
-| 5. quantum format | `qconvert` with `--eval`, `--out qwen3.qformat`, `--qrack_layer` |
+Measured fresh run on the 2 vCPU VM (`QRACK_TOKENS=2 PRECISION_LAYERS=4`, everything else default):
 
-| Variable | Default | Effect |
+| Stage | Time | Result |
 |---|---|---|
-| `MODEL_ID` | `Qwen/Qwen3-0.6B` | any gated SiLU model for stage 5; any supported model for stage 4 |
-| `WORK` | `./qwen3-holoqubed` | working directory |
-| `PROMPT` | "The capital of the Netherlands is" | generation prompt |
-| `Z` | 3.0 | atlas ellipsoid width |
-| `QRACK_LAYER` | 14 | layer run in PyQrack; `-1` skips it |
-| `QRACK_TOKENS` | 6 | tokens generated in the PyQrack run (about 7 minutes per token on 2 vCPU) |
-| `WORKERS` | CPU count | QrackSimulator worker processes |
-| `SKIP_PIP` | 0 | `1` skips stage 1 |
+| 1. dependencies | 5 s | already installed |
+| 2. download | 2 min 16 s | 7 files |
+| 3. data | 31 s | 1.2 MB calibration, 1.3 MB evaluation text |
+| 4a. forge | 2 min 01 s | 28 layers, 64 regions, rank 128 |
+| 4b. selftest | 15 s | OpenCL kernels match NumPy on layers 0, 14, 27 |
+| 4c. bench | 1 min 43 s | z 3.0: PPL 28.03 vs 28.02, top-1 99.61%, MLP work 108.9% |
+| 4d. generate | 36 s | OpenCL and dense outputs compared |
+| 5. qconvert | 13 min 47 s | PPL 27.70, top-1 89.41%; layer 14 in PyQrack token-identical, max logit difference 6.0e-5, 125,829,120 gates in 782 s |
+| 6. graphs | 29 s | 8 figures |
+| 7. precision | 8 min 42 s | 28 rows on 4 layers |
+| total to dashboard | 30 min 25 s | |
+| 8. dashboard | | torch 5.26, atlas NumPy 2.98, atlas OpenCL 1.54 decode tokens/s (40 tokens, PoCL CPU device) |
 
 ---
 
@@ -654,7 +653,7 @@ python3 holoqubed_live.py --model_id facebook/opt-125m --atlas opt-125m.atlas
 | `--atlas` | none | enables the atlas backends and the geometry panels; without it only `torch` runs |
 | `--host`, `--port` | 127.0.0.1, 8765 | listen address; use `--host 0.0.0.0` to watch from another machine |
 | `--threads` | torch default | torch threads |
-| `--gpus`, `--host_dictionary`, `--lookup`, `--kappa` | as `generate` | OpenCL device count, zero-copy atlas, region lookup, SiLU tolerance |
+| `--gpus`, `--host_dictionary`, `--lookup`, `--kappa` | as `generate` | OpenCL device count, zero-copy atlas (automatic when every OpenCL device is a CPU), region lookup, SiLU tolerance |
 | `--no_warmup` | off | skip paging the memory-mapped atlas in at startup (otherwise the first prefill includes the disk read) |
 
 | Endpoint | Method | Body / result |

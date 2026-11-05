@@ -467,7 +467,9 @@ class AtlasDictionary:
         for meta in self.manifest["layers"]:
             arrays = {}
             for key, fn in meta["files"].items():
-                a = np.load(os.path.join(path, fn), mmap_mode="r" if mmap else None, allow_pickle=False)
+                # copy-on-write mapping: pages stay file backed, but the arrays are writeable, so OpenCL
+                # USE_HOST_PTR (--host_dictionary) can use them in place instead of copying them
+                a = np.load(os.path.join(path, fn), mmap_mode="c" if mmap else None, allow_pickle=False)
                 arrays[key] = a if a.ndim else a[()]
             self.layers.append(AtlasLayer(meta, arrays, lookup=lookup, window=window))
 
