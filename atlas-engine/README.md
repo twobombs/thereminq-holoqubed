@@ -2,7 +2,7 @@
 
 Holoqubed variant in which geometry takes part in the computation. The shape of the MLP input cloud decides, per token, which neurons are evaluated. Neurons whose pre-activation cannot plausibly become positive given where the token sits on the activation manifold are never read.
 
-One engine file, `holoqubed_atlas.py`, plus PyOpenCL; `holoqubed_graph.py` draws its geometry, circuits and topology; `holoqubed_precision.py` measures tile storage and simulator precision. No CUDA, no C++ build step.
+One engine file, `holoqubed_atlas.py`, plus PyOpenCL; `holoqubed_graph.py` draws its geometry, circuits and topology; `holoqubed_live.py` is the interactive dashboard; `holoqubed_precision.py` measures tile storage and simulator precision. No CUDA, no C++ build step.
 
 | Requirement | Needed for |
 |---|---|
@@ -535,10 +535,43 @@ Practical split: store tree angles at 6 / 8 bits (420 MB layer file that loads s
 
 ## `qwen_holoqubed.sh`
 
-Downloads Qwen3-0.6B, converts it both ways and runs it through `holoqubed_atlas.py`.
+Downloads Qwen3-0.6B, converts it both ways, runs every tool on it and ends in the live dashboard.
 
-| Stage | Commands |
+| Stage | Commands | Output |
+|---|---|---|
+| 1. dependencies | `pip install torch transformers numpy pyopencl pyqrack datasets huggingface_hub matplotlib` | |
+| 2. download | `huggingface_hub.snapshot_download` | `$WORK/model` |
+| 3. data | `data` (WikiText-2) | `wiki_calib.txt`, `wiki_test.txt` |
+| 4. geometric atlas | `forge` (4096 calibration tokens, skipped if present), `selftest` (layers 0, 14, 27), `bench` (z, 2 windows), `generate` (OpenCL, `--compare`) | `qwen3.atlas`, `bench_atlas.json` |
+| 5. quantum format | `qconvert` with `--eval`, `--out`, `--qrack_layer` | `qwen3.qformat`, `qconvert.json` |
+| 6. graphs | `holoqubed_graph.py` with real tokens | `graphs/` |
+| 7. precision | `holoqubed_precision.py` | `precision.json` |
+| 8. live dashboard | `holoqubed_live.py` (runs until Ctrl+C) | `http://$LIVE_HOST:$LIVE_PORT` |
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MODEL_ID` | `Qwen/Qwen3-0.6B` | any gated SiLU model for stages 5 and 7; any supported model for stages 4, 6, 8 |
+| `WORK` | `./qwen3-holoqubed` | working directory |
+| `STAGES` | `1 2 3 4 5 6 7 8` | stages to run; a stage whose inputs are missing stops with the stage to run first |
+| `PROMPT` | "The capital of the Netherlands is" | generation prompt |
+| `Z` | 3.0 | atlas ellipsoid width |
+| `QRACK_LAYER` | 14 | layer run in PyQrack (stage 5) and marked in the topology graph; `-1` skips the PyQrack run |
+| `QRACK_TOKENS` | 6 | tokens generated in the PyQrack run (about 7 minutes per token on 2 vCPU) |
+| `WORKERS` | CPU count | QrackSimulator worker processes |
+| `GRAPH_LAYERS` | `0,14,27` | layers drawn in the geometry figures |
+| `PRECISION_EXPERIMENTS` | all six | rows of stage 7 |
+| `PRECISION_LAYERS` | 0 (all) | layers rewritten in stage 7; all 28 take about 70 minutes on 2 vCPU |
+| `LIVE_HOST`, `LIVE_PORT` | 127.0.0.1, 8765 | dashboard address |
+| `SKIP_PIP` | 0 | `1` skips stage 1 |
+
+| Run | Command |
 |---|---|
+| everything | `bash qwen_holoqubed.sh` |
+| quick, no PyQrack layer, one precision layer | `QRACK_LAYER=-1 PRECISION_LAYERS=1 bash qwen_holoqubed.sh` |
+| dashboard only, after a full run | `STAGES=8 bash qwen_holoqubed.sh` |
+| dashboard for another machine | `STAGES=8 LIVE_HOST=0.0.0.0 bash qwen_holoqubed.sh` |
+
+---|---|
 | 1. dependencies | `pip install torch transformers numpy pyopencl pyqrack datasets huggingface_hub` |
 | 2. download | `huggingface_hub.snapshot_download` into `$WORK/model` |
 | 3. data | `data` (WikiText-2) |
@@ -585,6 +618,63 @@ python3 holoqubed_graph.py --atlas opt-125m.atlas --layers 0,5,11 \
 | `--format`, `--dpi` | png, 150 | also `svg`, `pdf` |
 
 Circuits are drawn with column packing: gates on disjoint wires share a column, and each wire keeps its gate order.
+
+## Live Dashboard (`holoqubed_live.py`)
+
+Interactive variant of the graphs: a local web page served by the Python standard library (no extra packages, no CDN, works offline). Prompts go in, tokens stream out, and every step's performance and geometry is drawn as it arrives.
+
+```bash
+python3 holoqubed_live.py --model_id facebook/opt-125m --atlas opt-125m.atlas
+# open http://127.0.0.1:8765
+```
+
+| Input | Effect |
+|---|---|
+| Prompt | text to continue; Ctrl+Enter runs |
+| Backend | `torch` (original MLP modules), `atlas, NumPy` (reference), `atlas, OpenCL` (kernels, engine built on first use) |
+| z | ellipsoid width for the atlas backends |
+| Max new tokens, temperature, seed | greedy at temperature 0, else top-40 sampling |
+| MLP error vs dense | runs each layer's dense MLP next to the atlas and records the relative error; adds a dense pass to step latency |
+| Stop | ends the run after the current token |
+
+| Panel | Shows |
+|---|---|
+| KPI tiles | decode tokens/s, ms of the last token, prefill ms, MLP work (multiply-adds vs dense, router included), MLP share of step time, process CPU, resident memory |
+| Output | generated text; each token tinted by the MLP work of its step, hover for ms, probability and entropy |
+| Latency per token | ms per step, prefill first, crosshair tooltip |
+| MLP work per token | % of dense multiply-adds per step |
+| Layers over tokens | heatmap, selectable metric: routed neurons, MLP work, MLP time, MLP error vs dense |
+| Per layer, last token | the same metric as bars |
+| Chart plane | one layer: region centroids on chart axes 1 and 2, the Hilbert curve through them, the token path (older steps faded), the current region ringed |
+| Regions visited | region per token in Hilbert curve order; dot size grows with distance outside the region's typical radius |
+| Run history | backend, z, tokens, prefill, decode tokens/s, mean MLP work and wall time of every run, for side by side comparison |
+
+| Option | Default | Effect |
+|---|---|---|
+| `--atlas` | none | enables the atlas backends and the geometry panels; without it only `torch` runs |
+| `--host`, `--port` | 127.0.0.1, 8765 | listen address; use `--host 0.0.0.0` to watch from another machine |
+| `--threads` | torch default | torch threads |
+| `--gpus`, `--host_dictionary`, `--lookup`, `--kappa` | as `generate` | OpenCL device count, zero-copy atlas, region lookup, SiLU tolerance |
+| `--no_warmup` | off | skip paging the memory-mapped atlas in at startup (otherwise the first prefill includes the disk read) |
+
+| Endpoint | Method | Body / result |
+|---|---|---|
+| `/` | GET | the page |
+| `/api/info` | GET | model, backends, per-layer centroids (chart axes 1, 2) and Hilbert order, run history |
+| `/api/generate` | POST | `{prompt, backend, z, max_new_tokens, temperature, seed, measure_error}`; server-sent events `start`, `step` (per token: ms, CPU, RSS, probability, entropy, per-layer routed / nonzero / work / ms / error / region / chart position / scale), `done` (run summary), `error` |
+| `/api/stop` | POST | stops the running generation |
+
+One generation runs at a time; a second request gets HTTP 409. In the `torch` backend the original MLPs run through the atlas hooks, so geometry is still recorded and the timing includes a small NumPy to torch conversion per layer.
+
+Measured on the 2 vCPU VM, prompt "The capital of the Netherlands is":
+
+| Model | Backend | Decode tokens/s | MLP work | Output |
+|---|---|---|---|---|
+| OPT-125m | torch | 24.3 | 100% | " the capital of the Netherlands.\n\n" |
+| OPT-125m | atlas, NumPy, z 3.5 | 14.9 | 37.7% | identical |
+| OPT-125m | atlas, OpenCL (PoCL CPU), z 3.5 | 10.6 | 37.7% | identical |
+| Qwen3-0.6B | torch | 7.3 | 100% | " the city of Amsterdam." |
+| Qwen3-0.6B | atlas, NumPy, z 3.0 | 3.3 | 109.6% | identical (dense SiLU activations, no saving) |
 
 ---
 
