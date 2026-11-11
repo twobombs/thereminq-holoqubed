@@ -22,6 +22,7 @@
 #   Z                     atlas ellipsoid width                    default 3.0
 #   QRACK_LAYER           layer run in PyQrack, -1 to skip         default 14
 #   QRACK_TOKENS          tokens generated in the PyQrack run      default 6 (about 7 minutes per token on 2 vCPU)
+#   TILE_BITS, TILE_CODEC adaptive tile storage in stage 5         default 0 (off), scalar; e.g. TILE_BITS=4
 #   WORKERS               QrackSimulator worker processes          default: number of CPUs
 #   GRAPH_LAYERS          layers drawn in the geometry figures     default 0,14,27
 #   PRECISION_EXPERIMENTS precision rows                           default fp16,gray,tree,int,statevector,qformat
@@ -37,6 +38,8 @@ PROMPT="${PROMPT:-The capital of the Netherlands is}"
 Z="${Z:-3.0}"
 QRACK_LAYER="${QRACK_LAYER:-14}"
 QRACK_TOKENS="${QRACK_TOKENS:-6}"
+TILE_BITS="${TILE_BITS:-0}"
+TILE_CODEC="${TILE_CODEC:-scalar}"
 WORKERS="${WORKERS:-$(nproc)}"
 GRAPH_LAYERS="${GRAPH_LAYERS:-0,14,27}"
 PRECISION_EXPERIMENTS="${PRECISION_EXPERIMENTS:-fp16,gray,tree,int,statevector,qformat}"
@@ -96,7 +99,7 @@ if want 5; then
     step "5. quantum format: tiles + qneurons, perplexity, PyQrack layer $QRACK_LAYER"
     python3 "$ENGINE" qconvert --model_id "$MODEL" --calib wiki_calib.txt --eval wiki_test.txt --out qwen3.qformat \
         --prompt "$PROMPT" --max_new_tokens "$QRACK_TOKENS" --qrack_layer "$QRACK_LAYER" --workers "$WORKERS" \
-        --json qconvert.json
+        --tile_bits "$TILE_BITS" --tile_codec "$TILE_CODEC" --tiles_out qwen3.qtiles --json qconvert.json
 fi
 
 if want 6; then

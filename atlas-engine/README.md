@@ -454,6 +454,72 @@ Layer 14 genuinely in PyQrack, the other 27 layers emulated, prompt "The capital
 
 Whole-model estimate on this VM: 37,249,024 tiles per token at about 0.46 ms per tile cycle, about 4.7 hours per token. Storage is unchanged: 15 angles + 1 norm per 16 weights.
 
+### Adaptive Tile Storage (`qconvert --tile_bits`)
+
+Stores every linear map of the transformer layers smaller than the dense model, and runs the rest of `qconvert` (qneuron calibration, evaluation, generation, PyQrack layer) on the stored tiles. What is stored are the scaled weights B = W diag(w), where w_j is the rms of input column j on calibration text and the columns are sorted by w. Uniform absolute precision on B puts the bits where the inputs are large; a query divides the input by w before it is loaded, W x = B (x / w).
+
+```bash
+python3 holoqubed_atlas.py qconvert --model_id Qwen/Qwen3-0.6B --calib wiki_calib.txt --eval wiki_test.txt \
+    --tile_bits 4 --tile_codec scalar --tiles_out qwen3.qtiles
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `--tile_bits` | 0 (off) | target bits per weight of the stored codes (entropy) |
+| `--tile_codec` | `scalar` | `scalar`: round(B / step), entropy coded per band of 32 columns; tiles and preparation angles are derived at load. `angles`: per 4x4 tile a log-coded norm and the 15 Mottonen tree angles, circuit ready |
+| `--tiles_out` | `<out>/tiles` | directory of the tile file |
+| `--tile_calib_tokens` | 4096 | calibration tokens for the input scales |
+
+| File | Content |
+|---|---|
+| `manifest.json` | format `holoqubed-qtiles/1`, codec, per matrix: shape, step or level offset, stream sizes |
+| `scales.npz` | input scales per matrix, fp16 (0.6 MB for Qwen3-0.6B) |
+| `tiles.bin` | entropy-coded streams (bz2 or LZMA per stream, whichever is smaller) |
+
+| Angles codec detail | Rule |
+|---|---|
+| Precision of a tile | level b = rint(offset + log2 of its quantized norm): no side information; tiles below level 0 are dropped |
+| Bits per angle | leaves b + 2, split levels b + 2 / b + 1 / b (root first) |
+| Norm | 1/16 octave log code, plus b - 3 refinement bits above level 3 |
+
+`qtiles_load(path, model)` decodes a tile directory into a loaded model.
+
+Measured: Qwen3-0.6B, all 196 linear maps (440M weights, 881 MB at bf16), 510 test tokens, dense activation:
+
+| Storage | File size | Bits/weight, file / entropy | PPL (dense 28.02) | Top-1 vs dense | KL |
+|---|---|---|---|---|---|
+| bf16 source | 881 MB | 16 | 28.02 | 100.00% | 0.0000 |
+| int8 weights, scale per 128 | 447 MB | 8.13 | 28.06 | 96.47% | 0.0037 |
+| tree angles 6 / 8, fixed precision | 420 MB | 7.63 | 28.18 | 95.88% | 0.0054 |
+| **scalar, 6 bits** | 350 MB | 6.36 / 6.00 | 28.16 | 96.67% | 0.0041 |
+| **angles, 6 bits** | 335 MB | 6.08 / 6.00 | 28.00 | 96.27% | 0.0063 |
+| **scalar, 5 bits** | 285 MB | 5.19 / 5.00 | 28.74 | 91.96% | 0.0177 |
+| **scalar, 4 bits** | 229 MB | 4.17 / 4.00 | 29.64 | 88.24% | 0.0581 |
+| **angles, 4 bits** | 227 MB | 4.12 / 4.00 | 29.58 | 81.37% | 0.1101 |
+| int4 weights, scale per 128 | 227 MB | 4.13 | 37.25 | 66.47% | 0.4082 |
+| **scalar, 3 bits** | 179 MB | 3.24 / 3.00 | 32.65 | 70.39% | 0.2609 |
+| **angles, 3 bits** | 172 MB | 3.12 / 2.99 | 38.01 | 64.31% | 0.4917 |
+| **scalar, 2 bits** | 128 MB | 2.32 / 2.00 | 120.84 | 37.45% | 1.6515 |
+
+| Full `qconvert` on the 4-bit scalar tiles | PPL | Top-1 vs dense | KL |
+|---|---|---|---|
+| adaptive tiles, dense activation | 29.61 | 88.04% | 0.0581 |
+| quantum format (qneuron gating) on the stored tiles | 29.53 | 84.12% | 0.0928 |
+
+Encoding takes about 3 minutes and decoding 25 to 45 seconds on 2 vCPU. Embeddings and the output head (622 MB at bf16) are not tiled: the whole model goes from 1.50 GB to about 0.85 GB at 4 bits.
+
+What was measured on the way (probes on Qwen3-0.6B):
+
+| Question | Result |
+|---|---|
+| Entropy coding of the fixed 6 / 8 tree angles | 7.62 to 6.75 bits per weight at unchanged quality |
+| Input scales per column vs one step per matrix, 4 bits | KL 0.059 vs 0.179 |
+| Full rotation into the activation eigenbasis instead of scales | KL 0.059, needs 705 MB of rotations: no gain |
+| Seam between tile index and tile content (bond 4 / 8 / 12 of 16) | energy 0.26 / 0.51 / 0.76: no shared structure, also after reordering neurons |
+| Seam between rows and columns (rank truncation) at 25% size | loses 8 to 58% of the output energy; 2 to 28% with input scaling; quantization at that size loses 0.06 to 0.4% |
+| Angle storage vs scalar storage at equal size | angles cost about 0.6 bits per weight at 4 bits, about 0.2 at 6 |
+| Compressor overhead over the code entropy | 3 to 6% (bz2 / LZMA from the standard library) |
+
 ## Precision (`holoqubed_precision.py`)
 
 Storage precision of the tile angles and simulator precision of the statevector, against ordinary weight quantization. Each scheme rewrites every linear map in the transformer layers; perplexity, top-1 and KL are measured against the unmodified model. Tile decoding is emulated in NumPy with the engine's own gate list.
@@ -557,6 +623,7 @@ Downloads Qwen3-0.6B, converts it both ways, runs every tool on it and ends in t
 | `Z` | 3.0 | atlas ellipsoid width |
 | `QRACK_LAYER` | 14 | layer run in PyQrack (stage 5) and marked in the topology graph; `-1` skips the PyQrack run |
 | `QRACK_TOKENS` | 6 | tokens generated in the PyQrack run (about 7 minutes per token on 2 vCPU) |
+| `TILE_BITS`, `TILE_CODEC` | 0 (off), `scalar` | stage 5 stores the linear maps as adaptive tiles at this many bits per weight and runs on them |
 | `WORKERS` | CPU count | QrackSimulator worker processes |
 | `GRAPH_LAYERS` | `0,14,27` | layers drawn in the geometry figures |
 | `PRECISION_EXPERIMENTS` | all six | rows of stage 7 |
@@ -587,6 +654,183 @@ Measured fresh run on the 2 vCPU VM (`QRACK_TOKENS=2 PRECISION_LAYERS=4`, everyt
 | 7. precision | 8 min 42 s | 28 rows on 4 layers |
 | total to dashboard | 30 min 25 s | |
 | 8. dashboard | | torch 5.26, atlas NumPy 2.98, atlas OpenCL 1.54 decode tokens/s (40 tokens, PoCL CPU device) |
+
+Same run with `TILE_BITS=4` (fresh work folder, all 8 stages): 23 min 13 s to the dashboard. Stage 5 takes 11 min 20 s: it writes `qwen3.qtiles` (229 MB), reloads it and runs on the stored tiles; layer 14 in PyQrack stays token-identical to the emulation (max logit difference 7.2e-5, 425 s). Stages 6 to 8 use the dense model in `$WORK/model`.
+
+---
+
+## Unitary Model (`holoqubed_unitary.py`)
+
+A natively unitary language model trained on real text, instead of a converted one. Sequential Born machine at character level: one register of memory qubits interleaved with vocabulary qubits; per character one learned brick-wall circuit of 2-qubit blocks (15 angles + 3 CNOTs each, the same circuit at every step), then a measurement of the vocabulary register. The measurement samples the next character (Born rule, one shot), applies the only nonlinearity (project and renormalize the memory) and leaves the register in |k>, which is the next step's input. Trained in torch on exact complex statevectors with teacher forcing (loss = -log P(true char)), checkpointed per step; replayed in QrackSimulator with real gates and mid-circuit measurements.
+
+```bash
+python3 holoqubed_unitary.py --minutes 120                                  # CPU (torch), 2 hours in total
+python3 holoqubed_unitary.py --list_devices                                 # OpenCL platforms and devices
+python3 holoqubed_unitary.py --gradcheck --devices 6                        # OpenCL gradient vs torch autograd
+python3 holoqubed_unitary.py --backend opencl --devices 6 --hours 8 \
+    --dataset wikitext-103-raw-v1 --batch 64 --baseline_minutes 40          # 6 OpenCL GPUs, 8 hours
+python3 holoqubed_unitary.py --backend opencl --devices 6 --hours 16 \
+    --dataset wikitext-103-raw-v1 --batch 64 --resume unitary_model.pt       # continue to 16 hours in total
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `--minutes` | 120 | total training budget: 55% unitary model, 7% equal-parameter LSTM, 13% LSTM, 13% transformer, rest evaluation |
+| `--mem_qubits`, `--vocab_qubits` | 7, 7 | register size; vocabulary = 2^v most frequent characters (last one = unknown) |
+| `--depth` | 12 | brick-wall layers per character (78 blocks, 1,170 angles at 14 qubits) |
+| `--batch`, `--bptt`, `--lr` | 32, 32, 0.03 | parallel streams, backpropagation steps, Adam learning rate (cosine decay) |
+| `--baselines` | `ngram,lstm_equal,lstm,transformer` | 1-, 3-, 5-gram, LSTM with the unitary model's parameter count, LSTM hidden 256, 2-layer transformer |
+| `--train`, `--test` | `<dataset>_train.txt`, `<dataset>_test.txt` (e.g. `wikitext-2_train.txt`) | downloaded from `--dataset` when missing |
+| `--prompt`, `--replay_chars` | "The ", 160 | PyQrack replay: prompt post-selected, then free sampling |
+| `--backend` | `torch` | `torch` (CPU autograd) or `opencl` (data parallel, custom kernels) |
+| `--devices`, `--device_type`, `--platform` | 1, `gpu`, any | OpenCL workers (one process per device), device type, platform name filter (e.g. `rusticl`, `AMD`) |
+| `--hours` | 0 | unitary training time (total, including a resumed part); baselines then get `--baseline_minutes` (40) |
+| `--dataset` | `wikitext-2-raw-v1` | any `Salesforce/wikitext` config, e.g. `wikitext-103-raw-v1` (about 540M characters) |
+| `--eval_minutes`, `--ckpt_minutes`, `--log_seconds` | 30, 10, 60 | periodic test evaluation (best kept as `<save>.best`), checkpoint, progress line |
+| `--resume`, `--keep_schedule` | | continue from a checkpoint; keep its planned duration instead of the new `--hours` |
+| `--baseline_chars` | 0 (all) | cap the CPU baselines' training text on large datasets |
+| `--oversubscribe` | off | more workers than devices (testing on one device) |
+
+### OpenCL backend
+
+| Part | Implementation |
+|---|---|
+| Parallelism | one worker process per device (no shared interpreter lock), each with `--batch` streams; the host sums the block gradients of all workers, maps them to the angles through the block construction and steps Adam |
+| Forward | `apply4` per 2-qubit block, `probs` (Born probabilities of the vocabulary register), `pick_char` (loss), `project` (measurement and renormalization) |
+| Backward | `mdot` and `mgrad` (gradient of the measurement step), `back4` per block: uncomputes the block with its adjoint, propagates the gradient and accumulates dL/dM per work-group, so no intermediate states are stored; `reduce16` sums the work-groups |
+| Device memory | (bptt + 4) x batch x 2^n x 8 bytes + blocks x groups x 128 bytes; 14 qubits, batch 64: about 0.35 GiB |
+| Kernel launches | bptt x (3 x blocks + 10) per chunk per device |
+| Streams | written once as `.npy`, memory-mapped by the workers |
+| Stop and resume | SIGINT or SIGTERM ends after the current chunk and saves; `--resume` restarts the stream positions with the memory in \|0> |
+
+| Check (PoCL CPU, 2 workers sharing one device) | Result |
+|---|---|
+| Gradient vs torch autograd, first chunk | relative difference 3.6e-6, loss 4.459702 both |
+| Gradient vs torch autograd, second chunk (carried state) | relative difference 1.1e-6, loss 4.037255 both |
+| Training with periodic evaluation and checkpoints | test BPC 6.97, then 6.80; best checkpoint written |
+| Resume to a new total, then SIGINT | continued from 9.2k to 13.3k characters, saved and exited cleanly, workers stopped |
+| PyQrack replay of the OpenCL-trained model | max probability difference 2.7e-7 |
+
+Benchmark, torch backend vs OpenCL backend on PoCL, one worker on the 2 vCPU VM (same data, same initial angles, depth 12, bptt 32; first chunk excluded as warm-up):
+
+| Qubits (memory + vocabulary) | Blocks | Streams | torch train chars/s | PoCL train chars/s | PoCL / torch | torch eval chars/s | PoCL eval chars/s | Eval NLL difference |
+|---|---|---|---|---|---|---|---|---|
+| 10 (5 + 5) | 54 | 16 | 572 | 916 | 1.60x | 3,271 | 3,488 | 1.9e-7 |
+| 10 (5 + 5) | 54 | 64 | 1,303 | 1,118 | 0.86x | 3,166 | 3,835 | 1.0e-7 |
+| 12 (6 + 6) | 66 | 16 | 286 | 236 | 0.83x | 1,144 | 1,189 | 1.3e-8 |
+| 12 (6 + 6) | 66 | 64 | 306 | 249 | 0.81x | 1,141 | 1,165 | 4.5e-8 |
+| 14 (7 + 7) | 78 | 16 | 71 | 54 | 0.76x | 347 | 317 | 7.4e-8 |
+| 14 (7 + 7) | 78 | 64 | 74 | 54 | 0.73x | 318 | 316 | 2.9e-7 |
+| 16 (9 + 7) | 90 | 16 | 17 | 12 | 0.69x | 79 | 74 | 3.1e-9 |
+
+Same model trained for 10 chunks on both backends (14 qubits, 16 streams): the losses agree to 1e-7 for 3 chunks, then drift (largest gap 0.12 BPC, angles 10% apart after 10 Adam steps). Two torch runs whose angles differ by 1e-6 drift the same way (largest gap 0.077 BPC, angles 7.8% apart): the training itself is that sensitive, the backends are equivalent.
+
+On a CPU both backends are limited by memory bandwidth (characters per second barely change between 16 and 64 streams from 12 qubits up); PoCL is 0.7x to 0.86x torch, and only wins (1.6x) at 10 qubits with 16 streams, where torch's per-operation overhead dominates. The OpenCL backend is for GPUs, where the same kernels run on device memory bandwidth and the six workers run on six devices instead of two shared cores. On GPUs the cost per chunk is dominated by kernel launches, which grow with depth and bptt but not with the batch, so a larger `--batch` per device raises characters per second almost linearly until the device is busy.
+
+### Measured: WikiText-2, 120 minutes on 2 vCPU
+
+Test: first 65,536 characters of the test split; vocabulary 128 characters (0.06% unknown).
+
+| Model | Parameters | Recurrent state | Training chars | BPC | Char perplexity |
+|---|---|---|---|---|---|
+| LSTM, hidden 256 | 370,816 | 256 + 256 reals | 84.76M | 1.982 | 3.95 |
+| transformer, 2 layers d 128 | 446,080 | context 128 chars | 41.93M | 2.132 | 4.38 |
+| 5-gram (interpolated, discount 0.75) | counts | last 4 chars | 10.89M | 2.141 | 4.41 |
+| 3-gram (interpolated, discount 0.75) | counts | last 2 chars | 10.89M | 2.973 | 7.85 |
+| LSTM, equal parameters | 1,312 | 4 + 4 reals | 621.30M | 3.403 | 10.57 |
+| 1-gram (add-one) | counts | none | 10.89M | 4.608 | 24.39 |
+| **unitary Born machine, 14 qubits** | 1,170 | 128 complex amplitudes after each measurement | 0.34M | **5.049** | **33.11** |
+
+Same training characters as the unitary model (0.34M):
+
+| Model | BPC | Char perplexity |
+|---|---|---|
+| LSTM, equal parameters, lr 0.03 | 3.855 | 14.47 |
+| LSTM, equal parameters, lr 0.01 | 4.176 | 18.07 |
+| 1-gram (add-one) | 4.614 | 24.49 |
+| unitary Born machine | 5.049 | 33.11 |
+
+| Unitary training | Value |
+|---|---|
+| Throughput | about 85 characters per second (equal-parameter LSTM: about 1.2M) |
+| Train BPC per 5 minutes | 6.65, 5.89, 5.59, 5.30, 5.26, 5.21, 5.15, 5.14, 5.07, 5.04, 5.00, 5.01, 4.97 (still falling) |
+| Uniform guess | 7.00 BPC |
+
+| PyQrack replay | Value |
+|---|---|
+| Circuit per character | 780 gates on 14 qubits, 7 measured qubits, 1 shot |
+| Max \|P_qrack - P_torch\| over 163 steps | 3.8e-5 (fp32 Qrack) |
+| Sample after "The " | characters without words yet: BPC 5 leaves about 33 plausible characters per step |
+
+| Finding | Evidence |
+|---|---|
+| The native design works mechanically | one shot per character, no readout of vectors, Qrack replay matches torch to 3.8e-5 |
+| Pure unitary models are far behind on real text at this size | 5.05 BPC: behind the unigram (4.61) at equal data and the equal-parameter LSTM (3.86) |
+| Classical simulation of the training is the bottleneck | 0.34M characters in 66 minutes, still improving; each step updates a 16,384-amplitude statevector per stream |
+| Where to push | more depth and data (hardware or a faster simulator), a learned output basis change before measurement, measuring fewer than all vocabulary qubits per step |
+
+---
+
+## Spectral Flattening (`holoqubed_spectral.py`)
+
+Every dense linear map converts exactly to W = U diag(s) V^H: U and V^H are unitary circuits, the diagonal is the only non-unitary part (one ancilla, one controlled rotation per singular value). Block encoded with s_max, a product succeeds with probability ||W x||^2 / (s_max^2 ||x||^2), and the probabilities multiply along the 196 products of a token. The probe freezes U and V^H (fp16) and trains only the singular values (s = s0 exp(a), 200,704 values for Qwen3-0.6B) by distillation against the unmodified model, with a penalty that pushes s_max / s_mean toward 1:
+
+    loss = KL(dense || model) + lambda * mean over matrices of log(s_max^2 / mean(s^2))
+
+```bash
+python3 holoqubed_spectral.py --model_id Qwen/Qwen3-0.6B --minutes 80 --lambda_start 0.001 --lambda_end 30
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `--minutes`, `--eval_minutes` | 80, 6 | run length (lambda ramps geometrically over it), evaluation interval |
+| `--lambda_start`, `--lambda_end` | 0.001, 30 | penalty weight at the start and the end |
+| `--lr`, `--seq`, `--batch` | 0.005, 256, 1 | Adam on the log singular values, training window |
+| `--train`, `--eval` | `wiki_calib.txt`, `wiki_test.txt` | distillation text, evaluation text (2 windows of 256 tokens) |
+
+Conversions without training (all 196 maps):
+
+| Conversion | PPL (dense 28.02) | Top-1 vs dense | KL |
+|---|---|---|---|
+| exact U diag(s) V^H (U, V^H in fp16) | 28.03 | 100.00% | 0.0000 |
+| nearest unitary (polar factor times mean s) | 2.5e13 | 0.00% | 27.3 |
+| spectrum flattened, s^0.5 | 8.1e10 | 1.96% | 21.5 |
+| nearest unitary in attention only | 1.6e8 | 1.37% | 15.3 |
+| nearest unitary in the MLP only | 1.9e10 | 0.20% | 20.3 |
+
+| Matrix (start) | s_max / s_mean | Condition number | Success per product, isotropic input |
+|---|---|---|---|
+| q_proj | 5.5 | 48 | 0.051 |
+| k_proj | 5.5 | 17,529 | 0.059 |
+| v_proj | 3.2 | 8,768 | 0.146 |
+| o_proj | 3.2 | 20 | 0.131 |
+| gate_proj | 4.0 | 69 | 0.073 |
+| up_proj | 2.4 | 46 | 0.208 |
+| down_proj | 3.1 | 18 | 0.124 |
+
+### Measured: 80 minutes on 2 vCPU, 575 steps
+
+| Step | lambda | PPL | Top-1 vs dense | KL | s_max/s_mean q / up / down | Median success per product | Chain of 196 products, real activations |
+|---|---|---|---|---|---|---|---|
+| 0 | 0 | 28.03 | 100.00% | 0.0000 | 5.50 / 2.36 / 3.05 | 0.124 | 10^-221 |
+| 88 | 0.005 | 27.74 | 90.20% | 0.0343 | 5.54 / 2.35 / 3.03 | 0.126 | 10^-219 |
+| 219 | 0.052 | 28.13 | 87.65% | 0.0437 | 5.39 / 2.29 / 2.97 | 0.131 | 10^-214 |
+| 308 | 0.254 | 27.96 | 89.02% | 0.0550 | 4.93 / 2.13 / 2.65 | 0.168 | 10^-198 |
+| 353 | 0.565 | 28.60 | 85.88% | 0.0741 | 4.44 / 1.98 / 2.32 | 0.219 | 10^-186 |
+| 398 | 1.26 | 29.38 | 82.16% | 0.1212 | 3.64 / 1.85 / 2.06 | 0.241 | 10^-172 |
+| 443 | 2.79 | 30.29 | 76.86% | 0.2018 | 3.14 / 1.77 / 1.91 | 0.262 | 10^-160 |
+| 487 | 6.17 | 31.73 | 73.14% | 0.3345 | 2.95 / 1.72 / 1.81 | 0.268 | 10^-151 |
+| 532 | 13.7 | 35.20 | 67.06% | 0.4841 | 2.77 / 1.70 / 1.77 | 0.306 | 10^-147 |
+| 575 | 29.6 | 41.92 | 61.18% | 0.7203 | 2.91 / 1.75 / 1.78 | 0.288 | 10^-157 |
+
+| Finding | Evidence |
+|---|---|
+| The conversion itself is exact | U diag(s) V^H reproduces the model (KL 0.0000); the spectrum carries the knowledge, a unitary replacement destroys it |
+| Flattening buys orders of magnitude, not a usable chain | 10^-221 to 10^-147 at KL 0.48 and 67% top-1 |
+| A usable chain needs near-unitary products | chain success 0.5 over 196 products needs 0.9965 per product; the run reached a median of about 0.3 |
+| Quality falls before the spectra get close | s_max / s_mean stays at 1.7 to 2.9 while top-1 drops to 61% |
+| Frozen singular vectors limit the probe | only s is trained; a full fine-tune can rotate U and V and may flatten further at equal quality |
+| Training noise costs a little on its own | at negligible lambda the KL already reaches 0.02 to 0.04 (top-1 about 90%) from Adam steps on 200k values |
 
 ---
 
@@ -674,6 +918,19 @@ Measured on the 2 vCPU VM, prompt "The capital of the Netherlands is":
 | OPT-125m | atlas, OpenCL (PoCL CPU), z 3.5 | 10.6 | 37.7% | identical |
 | Qwen3-0.6B | torch | 7.3 | 100% | " the city of Amsterdam." |
 | Qwen3-0.6B | atlas, NumPy, z 3.0 | 3.3 | 109.6% | identical (dense SiLU activations, no saving) |
+
+---
+
+## Checks (`holoqubed_check.sh`)
+
+Run before committing or bundling; about one minute on 2 vCPU.
+
+| Check | What it runs |
+|---|---|
+| 1. syntax | `py_compile` on every Python script, `bash -n` on the shell scripts |
+| 2. command lines | `--help` of every script |
+| 3. unitary gradient | `holoqubed_unitary.py --gradcheck`: OpenCL gradient vs torch autograd over two chunks (`DEVICE_TYPE`, default `all`) |
+| 4. atlas kernels | `selftest` on `ATLAS=path/to/model.atlas`, when set |
 
 ---
 

@@ -291,7 +291,7 @@ def main():
                 r["owner"].forward = f
         restore()
         row = dict(scheme=label, bits_per_weight=bpw, size_mb=nw * bpw / 8 / 1e6, rel_weight_error=float(np.mean(err)),
-                   ppl=math.exp(nll / cnt), top1=hits / cnt, kl=kl / cnt, seconds=time.time() - t0)
+                   ppl=math.exp(nll / cnt), top1=hits / cnt, kl=max(0.0, kl / cnt), seconds=time.time() - t0)   # KL >= 0: clamp float noise
         results.append(row)
         print(f"| {label} | {bpw:.3f} | {row['size_mb']:.0f} MB | {row['rel_weight_error']:.2e} | {row['ppl']:.2f} | "
               f"{row['top1'] * 100:.2f}% | {row['kl']:.4f} |", flush=True)

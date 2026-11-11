@@ -1712,6 +1712,314 @@ def _qneuron_eval(args):
     return Hh, calls
 
 
+# ---- adaptive tile storage (qtiles) ------------------------------------------------------------
+#
+# What is stored are the SCALED weights B = W diag(w), w_j = rms of input j on calibration text, with the
+# columns sorted by w. A query divides the input by w before it is loaded: W x = B (x / w). Uniform
+# absolute precision on B puts the bits where the inputs are large (the input topography). Two codecs:
+#
+#   scalar   round(B / step), entropy coded per band of 32 columns. Smallest file. The 4x4 tiles and their
+#            preparation angles are derived when the model is loaded.
+#   angles   every 4x4 tile of B as a 4-qubit state: a log-coded norm and the 15 Mottonen tree angles
+#            (7 splits in [0, pi/2], 8 signed leaves). The precision of a tile follows from its own
+#            quantized norm, b = rint(offset + log2 n), so no side information is needed; the root and
+#            second split level get 2 and 1 extra bits, and tiles above level 3 a refined norm.
+#            Angles load straight into the tile circuits.
+#
+# All codes are entropy coded with bz2 or LZMA, whichever is smaller per stream.
+
+QTILES = "holoqubed-qtiles/1"
+_QT_STEPS = 16          # log2-norm resolution, steps per octave
+_QT_BMAX = 12           # level cap: leaves use b + 2 bits, splits b + (2, 1, 0); codes above 8 bits use 2 bytes
+_QT_K = (1, 2, 4, 8)    # angles per tile: three split levels, leaves
+_QT_EXTRA = (2, 1, 0)   # extra bits of the split levels (few angles, error spread over the whole tile)
+_QT_BAND = 32
+
+
+def _qt_tiles(W):
+    o, i = W.shape
+    return W.reshape(o // 4, 4, i // 4, 4).transpose(0, 2, 1, 3).reshape(-1, 16)
+
+
+def _qt_untiles(T, shape):
+    o, i = shape
+    return T.reshape(o // 4, i // 4, 4, 4).transpose(0, 2, 1, 3).reshape(o, i)
+
+
+def _qt_tree_encode(T):
+    a, b = T[:, 0::2], T[:, 1::2]
+    phi, r = np.arctan2(b, a), np.hypot(a, b)
+    betas = []
+    while r.shape[1] > 1:
+        r0, r1 = r[:, 0::2], r[:, 1::2]
+        betas.append(np.arctan2(r1, r0))
+        r = np.hypot(r0, r1)
+    return r[:, 0], betas[::-1], phi
+
+
+def _qt_tree_decode(nrm, betas, phi):
+    r = nrm[:, None]
+    for be in betas:
+        r = np.stack([r * np.cos(be), r * np.sin(be)], -1).reshape(r.shape[0], -1)
+    return np.stack([r * np.cos(phi), r * np.sin(phi)], -1).reshape(r.shape[0], -1)
+
+
+def _qt_entropy(codes):
+    c = codes.reshape(-1)
+    c = np.bincount(c - c.min()) if c.size else np.zeros(1, np.int64)
+    p = c[c > 0] / max(codes.size, 1)
+    return float(-(p * np.log2(p)).sum())
+
+
+def _qt_levels(ncode, offset):
+    b = np.rint(offset + ncode.astype(np.float64) / _QT_STEPS)
+    b = np.clip(b, -1, _QT_BMAX).astype(np.int8)
+    b[ncode == 0] = -1                                   # zero tile
+    return b
+
+
+def _qt_codes(betas, phi, sel, b):
+    out = []
+    for be, ex in zip(betas, _QT_EXTRA):
+        cells = 2 ** (b + ex)
+        out.append(np.minimum(np.floor(be[sel] / ((np.pi / 2) / cells)), cells - 1).astype(_qt_dtype(b + ex)))
+    cl = 2 ** (b + 2)
+    out.append((np.floor(phi[sel] / (2 * np.pi / cl)).astype(np.int64) % cl).astype(_qt_dtype(b + 2)))
+    return out
+
+
+def _qt_fine(b):
+    return max(0, b - 3)                                 # extra norm bits: the norm error follows the angle step
+
+
+def _qt_dtype(nbits):
+    return np.uint8 if nbits <= 8 else "<u2"
+
+
+def _qt_pack(raw: bytes) -> bytes:
+    import bz2
+    import lzma
+    if not raw:
+        return b"\x00"
+    cands = [b"\x00" + raw, b"\x01" + bz2.compress(raw, 9),
+             b"\x02" + lzma.compress(raw, format=lzma.FORMAT_RAW,
+                                     filters=[{"id": lzma.FILTER_LZMA2, "preset": 6, "lc": 0, "lp": 0, "pb": 0}])]
+    return min(cands, key=len)
+
+
+def _qt_unpack(blob: bytes) -> bytes:
+    import bz2
+    import lzma
+    tag, data = blob[0], blob[1:]
+    if tag == 0:
+        return data
+    if tag == 1:
+        return bz2.decompress(data)
+    return lzma.decompress(data, format=lzma.FORMAT_RAW,
+                           filters=[{"id": lzma.FILTER_LZMA2, "preset": 6, "lc": 0, "lp": 0, "pb": 0}])
+
+
+def _qt_encode_scalar(B, bits):
+    bands = [slice(c, min(c + _QT_BAND, B.shape[1])) for c in range(0, B.shape[1], _QT_BAND)]
+
+    def rate(C):
+        return sum(_qt_entropy(C[:, b]) * C[:, b].size for b in bands) / C.size
+    guess = math.log2(float(B.std()) or 1.0) + 2.05 - bits
+    lo, hi = guess - 30.0, guess + 30.0                  # rate falls monotonically with log2(step)
+    for _ in range(22):
+        mid = 0.5 * (lo + hi)
+        if rate(np.rint(B / 2.0 ** mid).astype(np.int32)) > bits:
+            lo = mid
+        else:
+            hi = mid
+    step = 2.0 ** (0.5 * (lo + hi))
+    C = np.rint(B / step).astype(np.int32)               # the stored codes belong to the stored step
+    r = rate(C)
+    width, streams = [], []                              # bytes per code of every band: 1, 2 or 4
+    for b in bands:
+        blk = C[:, b]
+        m = int(np.abs(blk).max())
+        w = 1 if m < 128 else 2 if m < 32768 else 4
+        width.append(w)
+        streams.append(_qt_pack(np.ascontiguousarray(blk.astype({1: np.int8, 2: "<i2", 4: "<i4"}[w])).tobytes()))
+    return dict(step=step, width=width, entropy_bits=r), streams
+
+
+def _qt_decode_scalar(meta, streams, shape):
+    o, i = shape
+    C = np.empty((o, i), np.float64)
+    for k, c in enumerate(range(0, i, _QT_BAND)):
+        n = min(_QT_BAND, i - c)
+        dt = {1: np.int8, 2: "<i2", 4: "<i4"}[meta["width"][k]]
+        C[:, c:c + n] = np.frombuffer(_qt_unpack(streams[k]), dtype=dt).reshape(o, n)
+    return C * meta["step"]
+
+
+def _qt_encode_angles(B, bits):
+    nrm, betas, phi = _qt_tree_encode(_qt_tiles(B))
+    N = nrm.shape[0]
+    lgf = np.log2(np.maximum(nrm, 1e-300)) * _QT_STEPS
+    lg = np.rint(lgf)
+    lg_min = float(lg[nrm > 0].max() - 253) if (nrm > 0).any() else 0.0     # the largest tiles keep exact codes
+    ncode = np.where(nrm > 0, np.clip(lg - lg_min + 1, 1, 255), 0).astype(np.uint8)
+    frac = np.clip(lgf - lg + 0.5, 0.0, 1.0 - 1e-12)     # position inside the coarse norm cell
+    h_norm = _qt_entropy(ncode) * N
+
+    def rate(offset):
+        lv = _qt_levels(ncode, offset)
+        total = h_norm
+        for b in range(0, _QT_BMAX + 1):
+            sel = lv == b
+            if sel.any():
+                total += _qt_fine(b) * int(sel.sum())
+                for c in _qt_codes(betas, phi, sel, b):
+                    total += _qt_entropy(c) * c.size
+        return total / (16 * N)
+
+    lo, hi = -40.0, 40.0                                 # rate is monotone in the offset
+    for _ in range(14):
+        mid = 0.5 * (lo + hi)
+        if rate(mid) < bits:
+            lo = mid
+        else:
+            hi = mid
+    offset = 0.5 * (lo + hi)
+    lv = _qt_levels(ncode, offset)
+    streams = [_qt_pack(ncode.tobytes())]
+    for b in range(0, _QT_BMAX + 1):
+        sel = lv == b
+        if not sel.any():
+            continue
+        if _qt_fine(b):
+            fine = np.floor(frac[sel] * 2 ** _qt_fine(b)).astype(_qt_dtype(_qt_fine(b)))
+            streams.append(_qt_pack(np.ascontiguousarray(fine).tobytes()))
+        for c in _qt_codes(betas, phi, sel, b):
+            streams.append(_qt_pack(np.ascontiguousarray(c.T).tobytes()))       # slot-major
+    return dict(offset=offset, lg_min=lg_min, entropy_bits=rate(offset),
+                levels={str(b): int((lv == b).sum()) for b in range(-1, _QT_BMAX + 1)}), streams
+
+
+def _qt_decode_angles(meta, streams, shape):
+    o, i = shape
+    N = (o // 4) * (i // 4)
+    it = iter(streams)
+    ncode = np.frombuffer(_qt_unpack(next(it)), dtype=np.uint8)
+    lv = _qt_levels(ncode, meta["offset"])
+    lgq = ncode.astype(np.float64) - 1 + meta["lg_min"]
+    betas = [np.full((N, k), np.pi / 4) for k in _QT_K[:3]]
+    phi = np.zeros((N, 8))
+    for b in range(0, _QT_BMAX + 1):
+        sel = lv == b
+        n = int(sel.sum())
+        if not n:
+            continue
+        if _qt_fine(b):                                  # refined norm of the high-precision tiles
+            fine = np.frombuffer(_qt_unpack(next(it)), dtype=_qt_dtype(_qt_fine(b)))
+            lgq[sel] += (fine + 0.5) / 2 ** _qt_fine(b) - 0.5
+        for lev, (k, ex) in enumerate(zip(_QT_K[:3], _QT_EXTRA)):
+            c = np.frombuffer(_qt_unpack(next(it)), dtype=_qt_dtype(b + ex)).reshape(k, n).T
+            betas[lev][sel] = (c + 0.5) * ((np.pi / 2) / 2 ** (b + ex))
+        c = np.frombuffer(_qt_unpack(next(it)), dtype=_qt_dtype(b + 2)).reshape(8, n).T
+        phi[sel] = (c + 0.5) * (2 * np.pi / 2 ** (b + 2))
+    nrm = np.where((ncode > 0) & (lv >= 0), 2.0 ** (lgq / _QT_STEPS), 0.0)
+    return _qt_untiles(_qt_tree_decode(nrm, betas, phi), (o, i))
+
+
+def qtiles_encode(W: np.ndarray, scale: np.ndarray, bits: float, codec: str = "scalar"):
+    """Encode one matrix at about `bits` entropy-coded bits per weight. Returns (meta, [stream bytes])."""
+    order = np.argsort(-scale, kind="stable")
+    B = (W * scale)[:, order]
+    meta, streams = (_qt_encode_scalar if codec == "scalar" else _qt_encode_angles)(B, bits)
+    meta.update(shape=list(W.shape), codec=codec)
+    return meta, streams
+
+
+def qtiles_decode(meta: dict, streams: list, scale: np.ndarray) -> np.ndarray:
+    order = np.argsort(-scale, kind="stable")
+    B = (_qt_decode_scalar if meta["codec"] == "scalar" else _qt_decode_angles)(meta, streams, tuple(meta["shape"]))
+    W = np.empty_like(B)
+    W[:, order] = B
+    return W / scale
+
+
+def qtiles_linears(model):
+    """(name, module) of every linear map in the transformer layers that tiles into 4x4 blocks."""
+    out = []
+    for name, m in model.named_modules():
+        if isinstance(m, nn.Linear) and ".layers." in f".{name}." and m.weight.shape[0] % 4 == 0 and m.weight.shape[1] % 4 == 0:
+            out.append((name, m))
+    return out
+
+
+def qtiles_scales(model, tok, text, n_tokens, linears, damp=0.01):
+    """Input topography: rms of every input column of every linear map on calibration text."""
+    acc = {name: None for name, _ in linears}
+    count = [0]
+
+    def hook(name):
+        def f(m, inp):
+            x = inp[0].detach().reshape(-1, inp[0].shape[-1]).double()
+            s = (x * x).sum(0)
+            acc[name] = s if acc[name] is None else acc[name] + s
+        return f
+    hs = [m.register_forward_pre_hook(hook(name)) for name, m in linears]
+    ids = tok(text, return_tensors="pt").input_ids[:, :n_tokens]
+    with torch.no_grad():
+        for s in range(0, ids.shape[1], 256):
+            w = ids[:, s:s + 256]
+            if w.shape[1] < 8:
+                break
+            model(w)
+            count[0] += w.shape[1]
+    for h in hs:
+        h.remove()
+    out = {}
+    for name, _ in linears:
+        d = (acc[name] / count[0]).numpy()
+        out[name] = np.sqrt(d + damp * d.mean()).astype(np.float16).astype(np.float64)   # as stored
+    return out, count[0]
+
+
+def qtiles_write(path, model, linears, scales, bits, model_id, codec="scalar", log=print):
+    os.makedirs(path, exist_ok=True)
+    man = dict(format=QTILES, model_id=model_id, codec=codec, target_bits=bits, norm_steps=_QT_STEPS, bmax=_QT_BMAX,
+               band=_QT_BAND, matrices=[])
+    np.savez(os.path.join(path, "scales.npz"), **{name: scales[name].astype(np.float16) for name, _ in linears})
+    t0 = time.time()
+    with open(os.path.join(path, "tiles.bin"), "wb") as f:
+        for n_done, (name, m) in enumerate(linears):
+            meta, streams = qtiles_encode(m.weight.detach().double().numpy(), scales[name], bits, codec)
+            meta.update(name=name, pos=f.tell(), sizes=[len(s) for s in streams])
+            for s in streams:
+                f.write(s)
+            man["matrices"].append(meta)
+            if (n_done + 1) % 28 == 0:
+                log(f"  tiles: {n_done + 1}/{len(linears)} matrices, {f.tell() / 1e6:.0f} MB, {time.time() - t0:.0f} s")
+    with open(os.path.join(path, "manifest.json"), "w") as f:
+        json.dump(man, f, indent=1)
+    return man
+
+
+def qtiles_load(path, model, log=print):
+    """Decode a qtiles directory into the model's linear maps. Returns per-matrix relative weight errors."""
+    with open(os.path.join(path, "manifest.json")) as f:
+        man = json.load(f)
+    if man.get("format") != QTILES:
+        raise SystemExit(f"{path} is not a {QTILES} directory")
+    scales = np.load(os.path.join(path, "scales.npz"))
+    errs = []
+    with open(os.path.join(path, "tiles.bin"), "rb") as f, torch.no_grad():
+        for meta in man["matrices"]:
+            f.seek(meta["pos"])
+            streams = [f.read(n) for n in meta["sizes"]]
+            W = qtiles_decode(meta, streams, scales[meta["name"]].astype(np.float64))
+            lin = model.get_submodule(meta["name"])
+            ref = lin.weight.detach().double().numpy()
+            errs.append(float(np.linalg.norm(W - ref) / max(np.linalg.norm(ref), 1e-300)))
+            lin.weight.copy_(torch.from_numpy(W).to(lin.weight.dtype))
+    return man, errs
+
+
 def qformat_calibrate(model, tok, text, n_tokens, cosines):
     """Per gated MLP: gate range G, cosine-series coefficients c (grid fit to SiLU), up-qubit scale eps."""
     mlps = find_mlps(model)
@@ -1755,6 +2063,38 @@ def cmd_qconvert(args):
     t_all = time.time()
     tok, model = load_model(args.model_id, args.trust_remote_code)
     torch.set_num_threads(max(1, os.cpu_count() or 1))
+    res_tiles, ref_logits, windows = None, None, None
+    if args.eval:
+        ids = tok(open(args.eval, encoding="utf-8").read()[: args.windows * args.window_len * 12],
+                  return_tensors="pt").input_ids
+        windows = [ids[:, k * args.window_len:(k + 1) * args.window_len] for k in range(args.windows)]
+    if args.tile_bits > 0:
+        if windows:                                      # reference: the original dense model
+            with torch.no_grad():
+                ref_logits = [model(w).logits[0, :-1].float() for w in windows]
+        linears = qtiles_linears(model)
+        nw = sum(m.weight.numel() for _, m in linears)
+        tdir = args.tiles_out or (os.path.join(args.out, "tiles") if args.out else "model.qtiles")
+        print(f"Adaptive tiles: {len(linears)} linear maps, {nw / 1e6:.1f}M weights, target {args.tile_bits} bits per weight")
+        t0 = time.time()
+        scales, ntok = qtiles_scales(model, tok, open(args.calib, encoding="utf-8").read(), args.tile_calib_tokens, linears)
+        print(f"  input scales from {ntok} calibration tokens in {time.time() - t0:.0f} s", flush=True)
+        t0 = time.time()
+        man = qtiles_write(tdir, model, linears, scales, args.tile_bits, args.model_id, args.tile_codec)
+        t_enc = time.time() - t0
+        t0 = time.time()
+        _, errs = qtiles_load(tdir, model)                # from here on the model runs on the stored tiles
+        size = sum(os.path.getsize(os.path.join(tdir, fn)) for fn in os.listdir(tdir))
+        res_tiles = dict(path=tdir, codec=args.tile_codec, weights=nw, bytes=size, bits_per_weight=size * 8 / nw,
+                         entropy_bits=float(np.average([mm["entropy_bits"] for mm in man["matrices"]],
+                                                       weights=[mm["shape"][0] * mm["shape"][1] for mm in man["matrices"]])),
+                         bf16_bytes=nw * 2, rel_weight_error=float(np.mean(errs)), encode_s=t_enc, decode_s=time.time() - t0)
+        r = res_tiles
+        print(f"\n| Adaptive tiles, {args.tile_codec} codec | Value |\n|---|---|\n"
+              f"| file size | {size / 1e6:.1f} MB ({nw * 2 / 1e6:.0f} MB at bf16, {size / (nw * 2) * 100:.1f}%) |\n"
+              f"| bits per weight, file / code entropy | {r['bits_per_weight']:.2f} / {r['entropy_bits']:.2f} |\n"
+              f"| relative weight error | {r['rel_weight_error']:.2e} |\n"
+              f"| encode / decode | {t_enc:.0f} s / {r['decode_s']:.0f} s |", flush=True)
     print(f"Calibrating quantum format for {args.model_id} ({args.cosines} cosine qubits + 1 up qubit per neuron)")
     mlps, params = qformat_calibrate(model, tok, open(args.calib, encoding="utf-8").read(), args.calib_tokens,
                                      args.cosines)
@@ -1779,17 +2119,24 @@ def cmd_qconvert(args):
             r["owner"].forward = _qformat_mlp(r, params[i], args.cosines) if fmt else orig[i]
 
     res = dict(model_id=args.model_id, cosines=args.cosines, layers=L)
+    if res_tiles:
+        res["tiles"] = res_tiles
     if args.eval:
-        ids = tok(open(args.eval, encoding="utf-8").read()[: args.windows * args.window_len * 12],
-                  return_tensors="pt").input_ids
-        windows = [ids[:, k * args.window_len:(k + 1) * args.window_len] for k in range(args.windows)]
         # streamed per window: full-vocabulary logits are never held for all windows and both models at once
         nll_d = nll_q = kl_sum = hits = count = 0.0
+        nll_t = kl_t = hits_t = 0.0
         with torch.no_grad():
-            for w in windows:
+            for wi, w in enumerate(windows):
                 tgt = w[0, 1:]
                 use(False)
                 lg_d = model(w).logits[0, :-1].float()
+                if ref_logits is not None:               # stored tiles with dense activation, vs the original model
+                    lg_t, lg_d = lg_d, ref_logits[wi]
+                    nll_t += float(F.cross_entropy(lg_t, tgt, reduction="sum"))
+                    hits_t += float((lg_d.argmax(-1) == lg_t.argmax(-1)).sum())
+                    lp_r, lp_t = F.log_softmax(lg_d, -1), F.log_softmax(lg_t, -1)
+                    kl_t += float((lp_r.exp() * (lp_r - lp_t)).sum())
+                    del lg_t, lp_r, lp_t
                 use(True)
                 lg_q = model(w).logits[0, :-1].float()
                 nll_d += float(F.cross_entropy(lg_d, tgt, reduction="sum"))
@@ -1804,9 +2151,15 @@ def cmd_qconvert(args):
                 del lp_d, lp_q
         ppl, top1, kl = math.exp(nll_q / count), hits / count, kl_sum / count
         res["eval"] = dict(dense_ppl=math.exp(nll_d / count), qformat_ppl=ppl, top1=top1, kl=kl, tokens=int(count))
+        trow = ""
+        if ref_logits is not None:
+            res["eval"].update(tiles_ppl=math.exp(nll_t / count), tiles_top1=hits_t / count, tiles_kl=max(0.0, kl_t / count))
+            trow = (f"| adaptive tiles ({res_tiles['bits_per_weight']:.2f} bits/weight), dense activation | "
+                    f"{res['eval']['tiles_ppl']:.2f} | {hits_t / count * 100:.2f}% | {max(0.0, kl_t / count):.4f} |\n")
         print(f"\n| Model | PPL | Top-1 vs dense | KL vs dense |\n|---|---|---|---|\n"
-              f"| dense | {res['eval']['dense_ppl']:.2f} | 100.00% | 0.0000 |\n"
-              f"| quantum format, all {L} layers | {ppl:.2f} | {top1*100:.2f}% | {kl:.4f} |", flush=True)
+              f"| dense | {res['eval']['dense_ppl']:.2f} | 100.00% | 0.0000 |\n" + trow +
+              f"| quantum format{' on the stored tiles' if trow else ''}, all {L} layers | {ppl:.2f} | {top1*100:.2f}% | {kl:.4f} |",
+              flush=True)
 
     use(True)
     ids = tok(args.prompt, return_tensors="pt").input_ids
@@ -2392,6 +2745,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--qrack_layer", type=int, default=-1, help="Run this layer genuinely in PyQrack (-1: none)")
     p.add_argument("--workers", type=int, default=2, help="QrackSimulator worker processes")
     p.add_argument("--out", default=None, help="Directory for the quantum-format parameters")
+    p.add_argument("--tile_bits", type=float, default=0.0,
+                   help="Store every linear map as adaptive tiles at about this many bits per weight (0: off)")
+    p.add_argument("--tile_codec", choices=["scalar", "angles"], default="scalar",
+                   help="scalar: smallest file, tiles derived at load; angles: tree angles per tile, circuit ready")
+    p.add_argument("--tiles_out", default=None, help="Directory of the tile file (default: <out>/tiles)")
+    p.add_argument("--tile_calib_tokens", type=int, default=4096, help="Calibration tokens for the input scales")
     p.add_argument("--json", default=None)
     p.set_defaults(func=cmd_qconvert)
     return ap
